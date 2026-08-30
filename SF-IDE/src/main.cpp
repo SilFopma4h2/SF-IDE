@@ -18,6 +18,7 @@
 #include <vector>
 
 #include "Editor.h"
+#include "BuildRunner.h"
 
 #pragma comment(lib, "d3d11.lib")
 #pragma comment(lib, "dxgi.lib")
@@ -563,6 +564,22 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int)
     ImGui_ImplDX11_Init(g_pd3dDevice, g_pd3dDeviceContext);
 
     EditorUI editor;
+    BuildRunner builder;
+
+    // Console pane: a simple rolling buffer of build output lines.
+    struct ConsoleLine { std::string text; bool isError; };
+    std::vector<ConsoleLine> consoleLines;
+    auto appendConsole = [&](const std::string& line, bool isError) {
+        consoleLines.push_back({line, isError});
+        // Keep the buffer bounded so very long builds do not exhaust memory.
+        if (consoleLines.size() > 5000)
+            consoleLines.erase(consoleLines.begin(),
+                               consoleLines.begin() + 1000);
+    };
+    auto builderCallback = [&](const std::string& line, bool isError) {
+        appendConsole(line, isError);
+    };
+
     bool running = true;
     MSG msg = {};
     while (running)
@@ -599,7 +616,27 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int)
             }
             if (ImGui::BeginMenu("Build"))
             {
-                ImGui::MenuItem("(no project)");
+                std::string projectDir;
+                if (!editor.edit.filePath.empty())
+                {
+                    projectDir = editor.edit.filePath;
+                    auto p = projectDir.find_last_of("/\\");
+                    if (p != std::string::npos) projectDir = projectDir.substr(0, p);
+                }
+                bool canBuild = !projectDir.empty() && builder.state() == BuildRunner::State::Idle;
+                if (ImGui::MenuItem("Build",  nullptr, false, canBuild))
+                {
+                    consoleLines.clear();
+                    appendConsole("[SF-IDE] Building " + projectDir, false);
+                    builder.start(projectDir, builderCallback);
+                }
+                if (ImGui::MenuItem("Cancel", nullptr, false,
+                                    builder.state() == BuildRunner::State::Configuring ||
+                                    builder.state() == BuildRunner::State::Building))
+                {
+                    builder.cancel();
+                    appendConsole("[SF-IDE] Build cancelled", true);
+                }
                 ImGui::EndMenu();
             }
             if (ImGui::BeginMenu("Debug"))
@@ -628,6 +665,43 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int)
         }
 
         editor.renderEditorWindow();
+
+        // Console / build output pane
+        if (ImGui::Begin("Console"))
+        {
+            // Build status line at the top
+            const char* stateText = "Idle";
+            ImVec4 stateColor(0.7f, 0.7f, 0.7f, 1.0f);
+            switch (builder.state())
+            {
+            case BuildRunner::State::Idle:        stateText = "Idle";        stateColor = ImVec4(0.7f, 0.7f, 0.7f, 1.0f); break;
+            case BuildRunner::State::Configuring:stateText = "Configuring..."; stateColor = ImVec4(0.9f, 0.9f, 0.4f, 1.0f); break;
+            case BuildRunner::State::Building:    stateText = "Building..."; stateColor = ImVec4(0.9f, 0.9f, 0.4f, 1.0f); break;
+            case BuildRunner::State::Succeeded:   stateText = "Build succeeded"; stateColor = ImVec4(0.4f, 1.0f, 0.4f, 1.0f); break;
+            case BuildRunner::State::Failed:      stateText = "Build failed";    stateColor = ImVec4(1.0f, 0.4f, 0.4f, 1.0f); break;
+            case BuildRunner::State::Error:       stateText = "Error";           stateColor = ImVec4(1.0f, 0.4f, 0.4f, 1.0f); break;
+            }
+            ImGui::TextColored(stateColor, "Status: %s", stateText);
+            ImGui::SameLine();
+            if (ImGui::SmallButton("Clear")) consoleLines.clear();
+            ImGui::Separator();
+
+            ImGui::BeginChild("##console_scroll", ImVec2(0, 0), true,
+                              ImGuiWindowFlags_HorizontalScrollbar);
+            for (const auto& cl : consoleLines)
+            {
+                ImVec4 c = cl.isError ? ImVec4(1.0f, 0.55f, 0.55f, 1.0f)
+                                      : ImVec4(0.85f, 0.85f, 0.85f, 1.0f);
+                ImGui::PushStyleColor(ImGuiCol_Text, c);
+                ImGui::TextUnformatted(cl.text.c_str());
+                ImGui::PopStyleColor();
+            }
+            // Auto-scroll to bottom
+            if (ImGui::GetScrollY() >= ImGui::GetScrollMaxY() - 4.0f)
+                ImGui::SetScrollHereY(1.0f);
+            ImGui::EndChild();
+            ImGui::End();
+        }
 
         ImGui::Render();
         const float clear[4] = { 0.10f, 0.10f, 0.12f, 1.00f };

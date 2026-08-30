@@ -33,6 +33,7 @@ endforeach()
 add_executable(SF-IDE WIN32
     src/main.cpp
     src/Editor.cpp
+    src/BuildRunner.cpp
     ${IMGUI_BACKEND_SOURCES}
 )
 
@@ -55,4 +56,10 @@ option(SFIDE_BUILD_TESTS "Build SF-IDE unit tests" OFF)
 if(SFIDE_BUILD_TESTS)
     add_executable(test_editor tests/test_editor.cpp src/Editor.cpp)
     target_include_directories(test_editor PRIVATE src)
+
+    add_executable(test_build tests/test_build.cpp src/BuildRunner.cpp)
+    target_include_directories(test_build PRIVATE src)
+    if(MSVC)
+        target_link_libraries(test_build PRIVATE advapi32)
+    endif()
 endif()

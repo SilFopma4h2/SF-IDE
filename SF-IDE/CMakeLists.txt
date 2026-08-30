@@ -32,6 +32,7 @@ endforeach()
 
 add_executable(SF-IDE WIN32
     src/main.cpp
+    src/Editor.cpp
     ${IMGUI_BACKEND_SOURCES}
 )
 
@@ -48,4 +49,10 @@ if(MSVC)
     # Treat the C runtime header files as the system header set so that MSVC
     # does not warn about standard library usage we cannot change.
     target_compile_options(SF-IDE PRIVATE /W4 /permissive- /utf-8)
+endif()
+
+option(SFIDE_BUILD_TESTS "Build SF-IDE unit tests" OFF)
+if(SFIDE_BUILD_TESTS)
+    add_executable(test_editor tests/test_editor.cpp src/Editor.cpp)
+    target_include_directories(test_editor PRIVATE src)
 endif()

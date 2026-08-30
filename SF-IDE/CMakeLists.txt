@@ -34,6 +34,7 @@ add_executable(SF-IDE WIN32
     src/main.cpp
     src/Editor.cpp
     src/BuildRunner.cpp
+    src/DebugSession.cpp
     ${IMGUI_BACKEND_SOURCES}
 )
 
@@ -62,4 +63,7 @@ if(SFIDE_BUILD_TESTS)
     if(MSVC)
         target_link_libraries(test_build PRIVATE advapi32)
     endif()
+
+    add_executable(test_debug tests/test_debug.cpp src/DebugSession.cpp)
+    target_include_directories(test_debug PRIVATE src)
 endif()

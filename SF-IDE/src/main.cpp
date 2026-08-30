@@ -1,5 +1,5 @@
 // SF-IDE - minimal native C++ IDE for Windows.
-// Phase 2: text editor with line numbers, syntax highlighting, open/save.
+// Phases 1-4: window, editor, build, debugger.
 
 #include <Windows.h>
 #include <commdlg.h>
@@ -19,6 +19,7 @@
 
 #include "Editor.h"
 #include "BuildRunner.h"
+#include "DebugSession.h"
 
 #pragma comment(lib, "d3d11.lib")
 #pragma comment(lib, "dxgi.lib")
@@ -566,6 +567,16 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int)
     EditorUI editor;
     BuildRunner builder;
 
+    // Debug state, updated from the DebugSession callback. Tracked in main
+    // because ImGui cannot bind to atomic<enum> directly.
+    DebugSession debugger;
+    std::atomic<DebugSession::State> m_state{DebugSession::State::Idle};
+    std::vector<DebugSession::LocalVar> locals;
+    std::vector<DebugSession::StackFrame> frames;
+    std::vector<std::string> debugEvents;
+    std::string lastBuiltExe;  // set when the build pipeline succeeds
+    std::string builderProjectDir;
+
     // Console pane: a simple rolling buffer of build output lines.
     struct ConsoleLine { std::string text; bool isError; };
     std::vector<ConsoleLine> consoleLines;
@@ -629,6 +640,9 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int)
                     consoleLines.clear();
                     appendConsole("[SF-IDE] Building " + projectDir, false);
                     builder.start(projectDir, builderCallback);
+                    // Remember the project directory so we can locate the
+                    // built executable when the user starts the debugger.
+                    builderProjectDir = projectDir;
                 }
                 if (ImGui::MenuItem("Cancel", nullptr, false,
                                     builder.state() == BuildRunner::State::Configuring ||
@@ -641,7 +655,44 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int)
             }
             if (ImGui::BeginMenu("Debug"))
             {
-                ImGui::MenuItem("(no session)");
+                bool canStart = (debugger.state() == DebugSession::State::Idle ||
+                                 debugger.state() == DebugSession::State::Stopped);
+                bool isRunning = (debugger.state() == DebugSession::State::Running ||
+                                  debugger.state() == DebugSession::State::Stepping);
+                bool isBreak   = (debugger.state() == DebugSession::State::Break);
+                if (ImGui::MenuItem("Start debugging", nullptr, false, canStart))
+                {
+                    // Use the build output (the .exe from the most recent
+                    // successful build) as the debug target. If the user has
+                    // not built yet, fall back to the source file path.
+                    std::string exe = lastBuiltExe;
+                    if (exe.empty() && !editor.edit.filePath.empty())
+                    {
+                        // If the source has a main(), we could compile it
+                        // ourselves; for now require a successful build.
+                        exe = editor.edit.filePath;
+                    }
+                    if (!exe.empty())
+                    {
+                        std::string dir;
+                        if (exe.find_last_of("/\\") != std::string::npos)
+                            dir = exe.substr(0, exe.find_last_of("/\\"));
+                        debugger.start(exe, dir,
+                            [&](const std::string& s) { appendConsole(s, false); },
+                            [&](DebugSession::State s) { m_state.store(s); },
+                            [&](const std::vector<DebugSession::LocalVar>& v) { locals = v; },
+                            [&](const std::vector<DebugSession::StackFrame>& f) { frames = f; },
+                            [&]() { /* stopped */ });
+                    }
+                }
+                if (ImGui::MenuItem("Continue", "F5", false, isBreak))
+                    debugger.requestContinue();
+                if (ImGui::MenuItem("Step Over", "F10", false, isBreak))
+                    debugger.requestStepOver();
+                if (ImGui::MenuItem("Step Into", "F11", false, isBreak))
+                    debugger.requestStepInto();
+                if (ImGui::MenuItem("Stop", "Shift+F5", false, isRunning || isBreak))
+                    debugger.requestStop();
                 ImGui::EndMenu();
             }
             ImGui::EndMainMenuBar();
@@ -677,7 +728,22 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int)
             case BuildRunner::State::Idle:        stateText = "Idle";        stateColor = ImVec4(0.7f, 0.7f, 0.7f, 1.0f); break;
             case BuildRunner::State::Configuring:stateText = "Configuring..."; stateColor = ImVec4(0.9f, 0.9f, 0.4f, 1.0f); break;
             case BuildRunner::State::Building:    stateText = "Building..."; stateColor = ImVec4(0.9f, 0.9f, 0.4f, 1.0f); break;
-            case BuildRunner::State::Succeeded:   stateText = "Build succeeded"; stateColor = ImVec4(0.4f, 1.0f, 0.4f, 1.0f); break;
+            case BuildRunner::State::Succeeded:
+                stateText = "Build succeeded";
+                stateColor = ImVec4(0.4f, 1.0f, 0.4f, 1.0f);
+                // Locate the produced executable for the debugger.
+                if (!builderProjectDir.empty())
+                {
+                    WIN32_FIND_DATAA fd = {};
+                    std::string search = builderProjectDir + "\\build\\Debug\\*.exe";
+                    HANDLE h = FindFirstFileA(search.c_str(), &fd);
+                    if (h != INVALID_HANDLE_VALUE)
+                    {
+                        lastBuiltExe = builderProjectDir + "\\build\\Debug\\" + fd.cFileName;
+                        FindClose(h);
+                    }
+                }
+                break;
             case BuildRunner::State::Failed:      stateText = "Build failed";    stateColor = ImVec4(1.0f, 0.4f, 0.4f, 1.0f); break;
             case BuildRunner::State::Error:       stateText = "Error";           stateColor = ImVec4(1.0f, 0.4f, 0.4f, 1.0f); break;
             }
@@ -700,6 +766,74 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int)
             if (ImGui::GetScrollY() >= ImGui::GetScrollMaxY() - 4.0f)
                 ImGui::SetScrollHereY(1.0f);
             ImGui::EndChild();
+            ImGui::End();
+        }
+
+        // Debugger pane
+        if (ImGui::Begin("Debugger"))
+        {
+            const char* dbgText = "Idle";
+            ImVec4 dbgColor(0.7f, 0.7f, 0.7f, 1.0f);
+            switch (m_state.load())
+            {
+            case DebugSession::State::Idle:      dbgText = "Idle";      dbgColor = ImVec4(0.7f, 0.7f, 0.7f, 1.0f); break;
+            case DebugSession::State::Running:   dbgText = "Running";   dbgColor = ImVec4(0.9f, 0.9f, 0.4f, 1.0f); break;
+            case DebugSession::State::Stepping:  dbgText = "Stepping";  dbgColor = ImVec4(0.9f, 0.9f, 0.4f, 1.0f); break;
+            case DebugSession::State::Break:     dbgText = "Break";     dbgColor = ImVec4(0.4f, 1.0f, 0.4f, 1.0f); break;
+            case DebugSession::State::Stopped:   dbgText = "Stopped";   dbgColor = ImVec4(0.7f, 0.7f, 0.7f, 1.0f); break;
+            case DebugSession::State::Error:     dbgText = "Error";     dbgColor = ImVec4(1.0f, 0.4f, 0.4f, 1.0f); break;
+            }
+            ImGui::TextColored(dbgColor, "Debugger: %s", dbgText);
+
+            if (ImGui::Button("Start")) {
+                if (!lastBuiltExe.empty()) {
+                    std::string dir = lastBuiltExe.substr(0, lastBuiltExe.find_last_of("/\\"));
+                    debugger.start(lastBuiltExe, dir,
+                        [&](const std::string& s) { debugEvents.push_back(s); },
+                        [&](DebugSession::State s) { m_state.store(s); },
+                        [&](const std::vector<DebugSession::LocalVar>& v) { locals = v; },
+                        [&](const std::vector<DebugSession::StackFrame>& f) { frames = f; },
+                        [](){});
+                }
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Continue")) debugger.requestContinue();
+            ImGui::SameLine();
+            if (ImGui::Button("Step Over")) debugger.requestStepOver();
+            ImGui::SameLine();
+            if (ImGui::Button("Step Into")) debugger.requestStepInto();
+            ImGui::SameLine();
+            if (ImGui::Button("Stop")) debugger.requestStop();
+            ImGui::SameLine();
+            if (ImGui::SmallButton("Clear events")) debugEvents.clear();
+
+            ImGui::Separator();
+            ImGui::Columns(2, "##dbg_cols", false);
+            ImGui::Text("Stack");
+            for (size_t i = 0; i < frames.size(); ++i)
+            {
+                const auto& f = frames[i];
+                ImGui::Text("%s  (%s:%d)",
+                            f.function.c_str(),
+                            f.sourceFile.empty() ? "?" : f.sourceFile.c_str(),
+                            f.sourceLine);
+            }
+            ImGui::NextColumn();
+            ImGui::Text("Locals");
+            for (const auto& l : locals)
+            {
+                ImGui::Text("%s = %s  [%s]",
+                            l.name.c_str(), l.value.c_str(),
+                            l.type.empty() ? "?" : l.type.c_str());
+            }
+            ImGui::Columns(1);
+
+            ImGui::Separator();
+            ImGui::Text("Events");
+            ImGui::BeginChild("##dbg_events", ImVec2(0, 120), true);
+            for (const auto& s : debugEvents) ImGui::TextUnformatted(s.c_str());
+            ImGui::EndChild();
+
             ImGui::End();
         }
 

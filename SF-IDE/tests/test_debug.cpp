@@ -61,14 +61,14 @@ int main()
     if (!fileExists(dir + "\\SFDbgTest.exe"))
     {
         if (!writeFile(dir + "\\main.cpp",
-                       "#include <cstdio>\n"
-                       "volatile int g_keep = 1;\n"
-                       "int main() {\n"
-                       "    int x = 42;\n"
-                       "    std::printf(\"hello %d\\n\", x);\n"
-                       "    while (g_keep) { }\n"
-                       "    return 0;\n"
-                       "}\n"))
+                       "#include <cstdio>\n"                              // 1
+                       "volatile int g_keep = 1;\n"                       // 2
+                       "int main() {\n"                                    // 3
+                       "    int x = 42;\n"                                // 4
+                       "    std::printf(\"hello %d\\n\", x);\n"            // 5
+                       "    while (g_keep) { }\n"                         // 6
+                       "    return 0;\n"                                  // 7
+                       "}\n"))                                             // 8
         {
             std::fprintf(stderr, "cannot write main.cpp\n");
             return 1;
@@ -119,11 +119,29 @@ int main()
         return 1;
     }
 
-    // The MVP does not yet resolve source line -> VA, so no breakpoint will
-    // be hit. We at least verify the debuggee starts, the worker thread
-    // pumps events, and requestStop terminates the process cleanly.
-    // Give the debuggee time to start and produce events.
-    std::this_thread::sleep_for(std::chrono::seconds(1));
+    // Place a breakpoint on the line `std::printf("hello %d\n", x);` which
+    // is line 5 in main.cpp above. The address resolver should match it to
+    // the first instruction of that line in the debuggee.
+    session.addBreakpoint("main.cpp", 5);
+
+    // Wait up to 10 seconds for the breakpoint to be hit. dbghelp line
+    // resolution can take a moment on the first call because the PDB has to
+    // be parsed.
+    if (!waitForState(session, DebugSession::State::Break,
+                      std::chrono::seconds(10)))
+    {
+        std::fprintf(stderr, "breakpoint was not hit\n");
+        session.requestStop();
+        std::this_thread::sleep_for(std::chrono::seconds(2));
+        std::fprintf(stderr, "DEBUG: events=%d, broken=%d\n",
+                     events.load(), broken.load() ? 1 : 0);
+        return 1;
+    }
+    std::fprintf(stdout, "OK: breakpoint hit\n");
+
+    // Continue so the debuggee runs into the while(g_keep) loop, then stop.
+    session.requestContinue();
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
     session.requestStop();
     if (!waitForState(session, DebugSession::State::Stopped,
                       std::chrono::seconds(5)))
@@ -131,15 +149,14 @@ int main()
         std::fprintf(stderr, "did not reach Stopped after requestStop\n");
         return 1;
     }
-    std::fprintf(stderr, "DEBUG: events=%d, state changes=%d\n",
-                 events.load(), stateChanges.load());
     if (events.load() == 0)
     {
         std::fprintf(stderr, "no events observed\n");
         return 1;
     }
 
-    std::printf("OK (events=%d, state changes=%d, stopped=%d)\n",
-                events.load(), stateChanges.load(), stopped.load() ? 1 : 0);
+    std::printf("OK (events=%d, state changes=%d, stopped=%d, broken=%d)\n",
+                events.load(), stateChanges.load(),
+                stopped.load() ? 1 : 0, broken.load() ? 1 : 0);
     return 0;
 }

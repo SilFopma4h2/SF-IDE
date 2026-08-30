@@ -22,6 +22,7 @@
 #include <functional>
 #include <string>
 #include <thread>
+#include <unordered_map>
 #include <vector>
 
 // A user-set breakpoint. `address` is the virtual address inside the
@@ -86,7 +87,6 @@ public:
 
 private:
     void runLoop();
-    void onLoadModule(const std::string& modulePath, DWORD64 baseAddr);
     void onBreakpointHit(DWORD threadId);
     void onSingleStepComplete(DWORD threadId);
     void emitState(State s);
@@ -104,6 +104,12 @@ private:
     void uninstallBreakpoint(Breakpoint& bp);
     void installPendingBreakpoints();
     void uninstallAllBreakpoints();
+    void tryResolveBreakpoint(Breakpoint& bp);
+
+    // Module table: keyed by load address. Updated from LOAD_DLL_DEBUG_EVENT
+    // and used by resolveBreakpoint to find the right module to query.
+    struct Module { std::string fileName; };
+    std::unordered_map<DWORD64, Module> m_modules;
 
     // Members
     HANDLE                              m_process = nullptr;

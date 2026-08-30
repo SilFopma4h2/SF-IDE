@@ -11,6 +11,8 @@
 #include <dbghelp.h>
 #pragma comment(lib, "dbghelp.lib")
 
+#include <algorithm>
+
 namespace {
 
 std::string wideToUtf8(const std::wstring& w)
@@ -127,13 +129,23 @@ bool DebugSession::start(const std::string& executable,
 
 void DebugSession::addBreakpoint(const std::string& sourceFile, int line)
 {
+    // Normalise: store just the basename-style tail (no directory) so we can
+    // match it against whatever path the PDB line table uses. The user may
+    // pass an absolute path, a relative one, or just a filename.
+    std::string normalised = sourceFile;
+    for (auto& c : normalised) if (c == '\\') c = '/';
+    auto p = normalised.find_last_of('/');
+    if (p != std::string::npos) normalised = normalised.substr(p + 1);
+
     Breakpoint bp;
-    bp.sourceFile = sourceFile;
+    bp.sourceFile = normalised;
     bp.sourceLine = line;
     m_breakpoints.push_back(bp);
-    emitEvent("Breakpoint queued at " + sourceFile + ":" +
-              std::to_string(line) +
-              " (address resolution not implemented in MVP)");
+    emitEvent("Breakpoint queued at " + normalised + ":" +
+              std::to_string(line));
+    // If the debuggee is already running, try to resolve immediately.
+    tryResolveBreakpoint(bp);
+    if (bp.address && !bp.installed) installBreakpoint(bp);
 }
 
 void DebugSession::clearBreakpoints()
@@ -236,9 +248,26 @@ void DebugSession::runLoop()
         switch (ev.dwDebugEventCode)
         {
         case CREATE_PROCESS_DEBUG_EVENT:
+        {
             os << "Process started (pid=" << ev.dwProcessId << ")";
             emitEvent(os.str());
+            // Initialise dbghelp for the debugger process and load the
+            // main module so its symbols are available for line queries.
+            SymInitialize(GetCurrentProcess(), nullptr, FALSE);
+            SymSetOptions(SYMOPT_LOAD_LINES | SYMOPT_UNDNAME);
+            std::string mainExe = m_pendingExe;
+            SymLoadModule64(GetCurrentProcess(), 0, mainExe.c_str(),
+                            nullptr, reinterpret_cast<DWORD64>(
+                                ev.u.CreateProcessInfo.lpBaseOfImage), 0);
+            m_modules[reinterpret_cast<DWORD64>(
+                ev.u.CreateProcessInfo.lpBaseOfImage)] = { mainExe };
+            for (auto& bp : m_breakpoints)
+            {
+                if (!bp.address) tryResolveBreakpoint(bp);
+                if (bp.address && !bp.installed) installBreakpoint(bp);
+            }
             break;
+        }
 
         case EXIT_PROCESS_DEBUG_EVENT:
             os << "Process exited (code=" << ev.u.ExitProcess.dwExitCode << ")";
@@ -246,10 +275,39 @@ void DebugSession::runLoop()
             m_running.store(false);
             break;
 
+        case LOAD_DLL_DEBUG_EVENT:
+        {
+            DWORD64 base = reinterpret_cast<DWORD64>(
+                ev.u.LoadDll.lpBaseOfDll);
+            char modulePath[MAX_PATH] = {};
+            if (GetFinalPathNameByHandleA(ev.u.LoadDll.hFile, modulePath,
+                                          MAX_PATH, FILE_NAME_NORMALIZED))
+            {
+                SymLoadModule64(GetCurrentProcess(), 0, modulePath, nullptr,
+                                base, 0);
+                m_modules[base] = { modulePath };
+            }
+            // Try to resolve any still-pending breakpoints against this
+            // module's line table.
+            for (auto& bp : m_breakpoints)
+            {
+                if (!bp.address) tryResolveBreakpoint(bp);
+                if (bp.address && !bp.installed) installBreakpoint(bp);
+            }
+            break;
+        }
+
+        case UNLOAD_DLL_DEBUG_EVENT:
+        {
+            DWORD64 base = reinterpret_cast<DWORD64>(
+                ev.u.UnloadDll.lpBaseOfDll);
+            m_modules.erase(base);
+            SymUnloadModule64(GetCurrentProcess(), base);
+            break;
+        }
+
         case CREATE_THREAD_DEBUG_EVENT:
         case EXIT_THREAD_DEBUG_EVENT:
-        case LOAD_DLL_DEBUG_EVENT:
-        case UNLOAD_DLL_DEBUG_EVENT:
         case OUTPUT_DEBUG_STRING_EVENT:
         case RIP_EVENT:
             // Report these as short notes so the user sees that the engine
@@ -298,25 +356,75 @@ void DebugSession::runLoop()
     if (m_onStopped) m_onStopped();
 }
 
-// --- Event handlers ---------------------------------------------------------
+// --- Breakpoint resolution and installation --------------------------------
 
-void DebugSession::onLoadModule(const std::string& modulePath, DWORD64 baseAddr)
+// Look up the VA for a (file, line) breakpoint by walking the line table of
+// every loaded module. The PDB line table stores the source path as the
+// compiler saw it; we match by the basename only because the user typically
+// passes a short file name from the editor.
+void DebugSession::tryResolveBreakpoint(Breakpoint& bp)
 {
-    (void)modulePath; (void)baseAddr;
+    if (bp.address) return;
+    if (bp.sourceFile.empty() || bp.sourceLine <= 0) return;
+
+    for (const auto& kv : m_modules)
+    {
+        IMAGEHLP_LINE64 line = {};
+        line.SizeOfStruct = sizeof(line);
+        LONG dispLong = 0;
+        // Pass the module's file path as the module-name argument; the API
+        // matches it against the module's PDB line table.
+        if (SymGetLineFromName64(GetCurrentProcess(), nullptr,
+                                 const_cast<char*>(kv.second.fileName.c_str()),
+                                 static_cast<DWORD>(bp.sourceLine), &dispLong, &line))
+        {
+            // The returned Address is the in-memory VA. dbghelp accounts for
+            // the module's load address when producing it, so it is the
+            // address we should patch.
+            if (line.Address != 0)
+            {
+                bp.address = line.Address;
+                std::ostringstream os;
+                os << "Breakpoint resolved at 0x" << std::hex << bp.address
+                   << " (" << bp.sourceFile << ":" << std::dec << bp.sourceLine
+                   << " in " << kv.second.fileName << ")";
+                emitEvent(os.str());
+                return;
+            }
+        }
+    }
 }
 
 void DebugSession::installBreakpoint(Breakpoint& bp)
 {
-    (void)bp;
+    if (bp.address == 0 || bp.installed) return;
+    if (!m_process) return;
+    uint8_t orig = 0;
+    if (!readProcessMemory(bp.address, &orig, 1)) return;
+    bp.savedByte = orig;
+    uint8_t cc = 0xCC;
+    if (!writeProcessMemory(bp.address, &cc, 1)) return;
+    bp.installed = true;
+    emitEvent("Breakpoint installed at 0x" + std::to_string(bp.address));
 }
 
 void DebugSession::uninstallBreakpoint(Breakpoint& bp)
 {
-    (void)bp;
+    if (bp.address == 0 || !bp.installed) return;
+    if (!m_process) return;
+    writeProcessMemory(bp.address, &bp.savedByte, 1);
+    bp.installed = false;
 }
 
-void DebugSession::installPendingBreakpoints() {}
-void DebugSession::uninstallAllBreakpoints() {}
+void DebugSession::installPendingBreakpoints()
+{
+    for (auto& bp : m_breakpoints) installBreakpoint(bp);
+}
+
+void DebugSession::uninstallAllBreakpoints()
+{
+    for (auto& bp : m_breakpoints) uninstallBreakpoint(bp);
+}
 
 void DebugSession::onBreakpointHit(DWORD threadId)
 {

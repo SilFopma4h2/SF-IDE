@@ -192,6 +192,9 @@ BuildRunner::BuildRunner() = default;
 BuildRunner::~BuildRunner()
 {
     cancel();
+    // Always join if a previous start() left a joinable thread, even when
+    // m_running already cleared. We do this unconditionally: a joinable
+    // std::thread that goes out of scope without join/detach terminates.
     if (m_thread.joinable()) m_thread.join();
     if (m_childJob) CloseHandle(m_childJob);
 }
@@ -206,6 +209,12 @@ void BuildRunner::cancel()
 bool BuildRunner::start(const std::string& projectDir, const LineCallback& onLine)
 {
     if (m_running.load()) return false;
+
+    // A previous run may have finished (m_running == false) but the worker
+    // thread handle may still be joinable. Reassigning std::thread without
+    // joining first triggers std::terminate(), so always join here.
+    if (m_thread.joinable()) m_thread.join();
+
     if (!resolveToolchain())
     {
         m_status.state   = State::Error;

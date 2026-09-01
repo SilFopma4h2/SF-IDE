@@ -1,0 +1,13 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="17.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <CustomBuild Include="C:\Users\silfo\SF-IDE\build\CMakeFiles\ec35bee56a2d0c24f505b1f036f3a6dd\generate.stamp.rule">
+      <Filter>CMake Rules</Filter>
+    </CustomBuild>
+  </ItemGroup>
+  <ItemGroup>
+    <Filter Include="CMake Rules">
+      <UniqueIdentifier>{4887A0C5-EA88-3970-9614-7627644D43DB}</UniqueIdentifier>
+    </Filter>
+  </ItemGroup>
+</Project>

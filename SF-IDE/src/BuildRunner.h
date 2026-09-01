@@ -51,11 +51,7 @@ public:
 
 private:
     void run();
-    bool resolveToolchain();      // populates m_vsPath and m_msvcVersion
-    bool runSubprocess(const std::string& cmdLine,
-                       const std::string& workDir,
-                       bool isErrorStream,
-                       int& exitCode);
+    bool resolveToolchain();      // populates m_vsPath
 
     Status             m_status;
     std::atomic<bool>  m_running{false};
@@ -64,7 +60,6 @@ private:
     std::string        m_projectDir;
     std::string        m_vsPath;          // e.g. C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools
     HANDLE             m_childJob = nullptr;
-    PROCESS_INFORMATION m_current{};
 
     void terminateChildTree();
 };

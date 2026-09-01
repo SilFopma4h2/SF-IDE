@@ -64,4 +64,10 @@ struct TextEdit {
     void offsetToLineCol(std::size_t offset, int& line, int& col) const;
     std::size_t lineColToOffset(int line, int col) const;
     int lineCount() const;
+
+private:
+    // Erase the active selection without pushing an undo snapshot. Used
+    // by insertText so a single edit produces one undo entry even when
+    // it overwrites a selection.
+    void eraseSelectionNoUndo();
 };

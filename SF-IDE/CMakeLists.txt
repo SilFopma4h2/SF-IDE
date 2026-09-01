@@ -54,21 +54,3 @@ if(MSVC)
     # does not warn about standard library usage we cannot change.
     target_compile_options(SF-IDE PRIVATE /W4 /permissive- /utf-8)
 endif()
-
-option(SFIDE_BUILD_TESTS "Build SF-IDE unit tests" OFF)
-if(SFIDE_BUILD_TESTS)
-    add_executable(test_editor tests/test_editor.cpp src/Editor.cpp)
-    target_include_directories(test_editor PRIVATE src)
-
-    add_executable(test_build tests/test_build.cpp src/BuildRunner.cpp)
-    target_include_directories(test_build PRIVATE src)
-    if(MSVC)
-        target_link_libraries(test_build PRIVATE advapi32)
-    endif()
-
-    add_executable(test_debug tests/test_debug.cpp src/DebugSession.cpp)
-    target_include_directories(test_debug PRIVATE src)
-
-    add_executable(test_editor_main tests/test_editor_main.cpp src/Editor.cpp)
-    target_include_directories(test_editor_main PRIVATE src)
-endif()

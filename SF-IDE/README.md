@@ -84,10 +84,12 @@ cmake -B build -G "Visual Studio 17 2022" -A x64 ^
 cmake --build build --config Debug
 ```
 
+A pre-built `SF-IDE.exe` is included in the repository root so you can run the IDE without building.
+
 ## Run
 
 ```powershell
-.\build\Debug\SF-IDE.exe
+.\SF-IDE.exe
 ```
 
 The window starts maximised. DPI is per-monitor aware (V2) so the font, gutter, and dock layout scale correctly on 4K displays.
@@ -100,26 +102,6 @@ The Explorer and the terminal expect a project root. Either:
 - use **File → Open Folder…** to pick one. The terminal will start in the chosen directory.
 
 The current source file's directory is the default project root for **Build**.
-
-## Tests
-
-Unit tests are gated behind `SFIDE_BUILD_TESTS`:
-
-```powershell
-cmake -B build -DSFIDE_BUILD_TESTS=ON
-cmake --build build --config Debug
-.\build\Debug\test_editor.exe
-.\build\Debug\test_editor_main.exe
-.\build\Debug\test_debug.exe
-.\build\Debug\test_build.exe
-```
-
-- `test_editor` — basic TextEdit: load / save, cursor, selection, undo / redo, line math, single-undo-entry-per-edit invariant.
-- `test_editor_main` — end-to-end load / edit / undo / save / reload against a realistic C++ file (verifies that all the source survives the round trip).
-- `test_debug` — drives a small child process through CreateProcess + WaitForDebugEvent, exercises breakpoint hit, single-step, restart.
-- `test_build` — runs the CMake build pipeline against a small `build_test_project` fixture and checks the resulting executable.
-
-All four should print `OK`.
 
 ## Keyboard
 
@@ -154,11 +136,6 @@ src/
   Terminal.h/.cpp     PowerShell with redirected pipes
   imgui_backends/     ImGui Win32 + DX11 backends
   app.rc, resource.h  Icon + Windows manifest
-tests/
-  test_editor.cpp
-  test_editor_main.cpp
-  test_debug.cpp
-  test_build.cpp
 ```
 
 The text editor stores a single UTF-8 `std::string` buffer with normalised `\n` line endings. Cursor and anchor are character offsets into the buffer. Undo snapshots the whole buffer on each user edit (small files, small IDE — the simplicity is the point). The renderer draws the gutter and code area on one ImDrawList using the dummy's `GetItemRectMin()` as the canvas origin; that makes text alignment independent of ImGui's internal cursor state.

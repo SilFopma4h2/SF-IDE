@@ -105,8 +105,9 @@ void TextEdit::pushUndo()
 void TextEdit::insertText(const std::string& text)
 {
     if (text.empty()) return;
+    // One user edit = one undo entry, even when it overwrites a selection.
     pushUndo();
-    deleteSelection();
+    eraseSelectionNoUndo();
     buffer.insert(cursor, text);
     cursor += text.size();
     anchor = cursor;
@@ -117,12 +118,18 @@ void TextEdit::deleteSelection()
 {
     if (!hasSelection()) return;
     pushUndo();
+    eraseSelectionNoUndo();
+    dirty = true;
+}
+
+void TextEdit::eraseSelectionNoUndo()
+{
+    if (!hasSelection()) return;
     const std::size_t lo = selectionMin();
     const std::size_t hi = selectionMax();
     buffer.erase(lo, hi - lo);
     cursor = lo;
     anchor = lo;
-    dirty = true;
 }
 
 void TextEdit::deleteBackspace()

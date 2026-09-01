@@ -1,0 +1,7 @@
+C:\Users\silfo\SF-IDE\src\main.cpp;C:\Users\silfo\SF-IDE\build\SF-IDE.dir\Debug\main.obj
+C:\Users\silfo\SF-IDE\src\Editor.cpp;C:\Users\silfo\SF-IDE\build\SF-IDE.dir\Debug\Editor.obj
+C:\Users\silfo\SF-IDE\src\BuildRunner.cpp;C:\Users\silfo\SF-IDE\build\SF-IDE.dir\Debug\BuildRunner.obj
+C:\Users\silfo\SF-IDE\src\DebugSession.cpp;C:\Users\silfo\SF-IDE\build\SF-IDE.dir\Debug\DebugSession.obj
+C:\Users\silfo\SF-IDE\src\Terminal.cpp;C:\Users\silfo\SF-IDE\build\SF-IDE.dir\Debug\Terminal.obj
+C:\Users\silfo\SF-IDE\src\imgui_backends\imgui_impl_win32.cpp;C:\Users\silfo\SF-IDE\build\SF-IDE.dir\Debug\imgui_impl_win32.obj
+C:\Users\silfo\SF-IDE\src\imgui_backends\imgui_impl_dx11.cpp;C:\Users\silfo\SF-IDE\build\SF-IDE.dir\Debug\imgui_impl_dx11.obj

@@ -20,6 +20,7 @@
 
 #include <atomic>
 #include <functional>
+#include <mutex>
 #include <string>
 #include <thread>
 #include <unordered_map>
@@ -27,16 +28,23 @@
 
 // A user-set breakpoint. `address` is the virtual address inside the
 // debuggee that we patch with 0xCC; we remember the original byte so we
-// can restore it on stop().
+// can restore it on stop() or while single-stepping over the original
+// instruction.
 struct Breakpoint {
     std::string sourceFile;
     int         sourceLine = 0;
     DWORD64     address    = 0;
     uint8_t     savedByte  = 0;
     bool        installed  = false;
+    bool        userAdded  = false;  // false for internal one-shot BPs
+    bool        oneShot    = false;  // removed after first hit
 };
 
 class DebugSession {
+public:
+    // Convenience: re-export the file-scope Breakpoint so member function
+    // signatures can be written as DebugSession::Breakpoint*.
+    using Breakpoint = ::Breakpoint;
 public:
     enum class State { Idle, Running, Stepping, Break, Stopped, Error };
 
@@ -72,9 +80,15 @@ public:
                const FramesCallback&   onFrames,
                const StoppedCallback&  onStopped);
 
-    // Add a breakpoint by source location. The session resolves the address
-    // lazily when the corresponding module is loaded.
+    // Breakpoint management. addBreakpoint inserts a user breakpoint that
+    // will be resolved and installed once the corresponding module is loaded
+    // (or immediately, if the debuggee is already running). The GUI is
+    // expected to call toggleBreakpoint / hasBreakpoint to keep the
+    // editor's gutter indicator in sync.
     void addBreakpoint(const std::string& sourceFile, int line);
+    void removeBreakpoint(const std::string& sourceFile, int line);
+    void toggleBreakpoint(const std::string& sourceFile, int line);
+    bool hasBreakpoint(const std::string& sourceFile, int line) const;
     void clearBreakpoints();
 
     // Actions on the running session
@@ -104,7 +118,13 @@ private:
     void uninstallBreakpoint(Breakpoint& bp);
     void installPendingBreakpoints();
     void uninstallAllBreakpoints();
+    void reinstallUserBreakpoints();
     void tryResolveBreakpoint(Breakpoint& bp);
+    void resolveAndInstallAllPending();
+    // findBreakpointAt returns a pointer to a vector element; the
+    // returned pointer is only valid until the next mutation of
+    // m_breakpoints. Callers should treat it as a transient handle.
+    Breakpoint* findBreakpointAt(DWORD64 addr, bool requireUser);
 
     // Module table: keyed by load address. Updated from LOAD_DLL_DEBUG_EVENT
     // and used by resolveBreakpoint to find the right module to query.
@@ -119,9 +139,11 @@ private:
     std::atomic<bool>                   m_stopRequested{false};
     std::thread                         m_thread;
     std::vector<Breakpoint>             m_breakpoints;
+    mutable std::mutex                  m_breakpointsMutex;
     DWORD64                             m_stepOverReturnAddress = 0;
     DWORD                               m_steppingThread        = 0;
-    bool                                m_resuming = true;
+    DWORD64                             m_pendingStepOverReturn = 0;
+    bool                                m_hardwareSingleStep    = false;
 
     // Launch parameters captured by start() and consumed by the worker
     // thread that performs the actual CreateProcessW (Win32 requires the

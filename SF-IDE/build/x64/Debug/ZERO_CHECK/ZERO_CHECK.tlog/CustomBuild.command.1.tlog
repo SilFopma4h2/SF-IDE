@@ -1,0 +1,10 @@
+^C:\USERS\SILFO\SF-IDE\BUILD\CMAKEFILES\EC35BEE56A2D0C24F505B1F036F3A6DD\GENERATE.STAMP.RULE
+setlocal
+"C:\Program Files\CMake\bin\cmake.exe" -SC:/Users/silfo/SF-IDE -BC:/Users/silfo/SF-IDE/build --check-stamp-list CMakeFiles/generate.stamp.list --vs-solution-file C:/Users/silfo/SF-IDE/build/SF-IDE.sln
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal & call :cmErrorLevel %errorlevel% & goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd

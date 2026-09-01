@@ -1,0 +1,131 @@
+# ==============================
+# SF-IDE - Git Ignore
+# ==============================
+
+# ---- Build directories ----
+build/
+build-*/
+cmake-build-*/
+out/
+bin/
+obj/
+Debug/
+Release/
+x64/
+x86/
+
+# ---- CMake generated files ----
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+install_manifest.txt
+compile_commands.json
+CTestTestfile.cmake
+Makefile
+*.cmake.user
+
+# ---- Visual Studio ----
+.vs/
+*.user
+*.suo
+*.vcxproj.user
+*.VC.db
+*.VC.opendb
+
+# ---- Ninja ----
+.ninja_deps
+.ninja_log
+build.ninja
+
+# ---- vcpkg ----
+vcpkg_installed/
+.vcpkg/
+vcpkg_packages/
+vcpkg_buildtrees/
+vcpkg_downloads/
+vcpkg_export/
+vcpkg-manifest-install.log
+
+# ---- C/C++ compiled files ----
+*.o
+*.obj
+*.a
+*.lib
+*.dll
+*.exe
+*.pdb
+*.ilk
+*.exp
+*.so
+*.dylib
+
+# ---- Debug / profiling ----
+*.dmp
+*.core
+*.prof
+*.gcda
+*.gcno
+*.gcov
+
+# ---- Logs ----
+*.log
+logs/
+
+# ---- Temporary files ----
+*.tmp
+*.temp
+*.bak
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# ---- IDE/editor ----
+.idea/
+.vscode/
+
+# Keep VS Code project settings if wanted:
+# !.vscode/settings.json
+# !.vscode/tasks.json
+# !.vscode/launch.json
+
+# ---- ImGui runtime state ----
+imgui.ini
+
+# ---- Application runtime data ----
+data/
+cache/
+temp/
+
+# ---- Environment / secrets ----
+.env
+.env.*
+!.env.example
+
+# ---- Certificates / keys ----
+*.pem
+*.key
+*.p12
+*.pfx
+
+# ---- Crash dumps ----
+crashdumps/
+*.dmp
+
+# ---- OS generated ----
+desktop.ini
+
+# ---- Generated documentation ----
+docs/_build/
+
+# ---- Test output ----
+test-results/
+coverage/
+
+# ---- Claude / AI local state ----
+.claude/
+.claude.json
+
+# ---- Local agent/runtime state ----
+.agents/

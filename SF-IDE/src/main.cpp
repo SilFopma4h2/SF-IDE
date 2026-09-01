@@ -912,9 +912,12 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int)
         appendConsole(line, isError);
     };
 
-    // Dock layout persistence: on first run, dock a sensible default layout
-    // (Explorer | Editor above Terminal below).
-    static bool initializedDock = false;
+    // Dock layout persistence: on first run (no imgui.ini yet) we build a
+    // default layout. Once DockBuilderFinish() has run, ImGui serialises the
+    // layout to imgui.ini and on subsequent launches it is restored from
+    // there, so the user can rearrange / undock panels and have the change
+    // stick across runs.
+    bool dockLayoutBuilt = false;
 
     // Pane visibility flags toggled from the View menu.
     bool showExplorer   = true;
@@ -965,47 +968,72 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int)
         ImGui_ImplWin32_NewFrame();
         ImGui::NewFrame();
 
-        // Full-viewport dockspace: gives us Explorer / Editor / Terminal
-        // docking regions.
-        ImGui::DockSpaceOverViewport(0, ImGui::GetMainViewport(),
-                                     ImGuiDockNodeFlags_PassthruCentralNode);
+        // Full-viewport, non-dockable host window. The actual DockSpace()
+        // is submitted inside this window so we own its flags and have a
+        // place to put the menu bar / status bar without them being part
+        // of the docking tree. Use WorkPos/WorkSize so the window is placed
+        // *below* the main menu bar (and outside the OS title bar) instead
+        // of overlapping them.
+        const ImGuiViewport* vp = ImGui::GetMainViewport();
+        ImGui::SetNextWindowPos(vp->WorkPos);
+        ImGui::SetNextWindowSize(vp->WorkSize);
+        ImGui::SetNextWindowViewport(vp->ID);
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
+        ImGui::Begin("SF-IDE DockSpace Host", nullptr,
+            ImGuiWindowFlags_NoDocking |
+            ImGuiWindowFlags_NoTitleBar |
+            ImGuiWindowFlags_NoCollapse |
+            ImGuiWindowFlags_NoResize |
+            ImGuiWindowFlags_NoMove |
+            ImGuiWindowFlags_NoBringToFrontOnFocus |
+            ImGuiWindowFlags_NoNavFocus |
+            ImGuiWindowFlags_NoBackground);
+        ImGui::PopStyleVar(3);
 
-        // Default layout for first run.
-        if (!initializedDock)
+        ImGuiID dockspaceId = ImGui::GetID("MainDockSpace");
+        const ImGuiDockNodeFlags rootFlags =
+            static_cast<ImGuiDockNodeFlags>(ImGuiDockNodeFlags_DockSpace |
+                                            ImGuiDockNodeFlags_PassthruCentralNode);
+        ImGui::DockSpace(dockspaceId, ImVec2(0, 0), rootFlags);
+
+        // On the very first frame after NewFrame() there is no root dock
+        // node yet (imgui.ini either does not exist or has not been
+        // applied to this DockSpace id). Build the default layout in that
+        // case; otherwise leave imgui.ini's saved layout alone.
+        if (!dockLayoutBuilt && ImGui::DockBuilderGetNode(dockspaceId) == nullptr)
         {
-            initializedDock = true;
-            ImGui::DockBuilderRemoveNode(0);
-            ImGuiID rootId = ImGui::GetID("MainDock");
-            // DockSpace + PassthruCentralNode keeps the central node
-            // transparent so the background clear colour shows through.
-            ImGuiDockNodeFlags rootFlags =
-                static_cast<ImGuiDockNodeFlags>(ImGuiDockNodeFlags_DockSpace |
-                                                ImGuiDockNodeFlags_PassthruCentralNode);
-            ImGui::DockBuilderAddNode(rootId, rootFlags);
-            ImGui::DockBuilderSetNodeSize(rootId, ImGui::GetMainViewport()->Size);
+            // DockBuilder uses its own id namespace, so use the same id
+            // the DockSpace registered as the root.
+            ImGui::DockBuilderRemoveNode(dockspaceId);
+            ImGui::DockBuilderAddNode(dockspaceId, rootFlags);
+            ImGui::DockBuilderSetNodeSize(dockspaceId, vp->WorkSize);
 
-            // Build: Editor in the middle, Explorer on the left,
-            // Debugger on the right, Output/Terminal at the bottom.
             //   +---------+----------------+---------+
             //   |Explorer |     Editor     |Debugger |
             //   +---------+----------------+---------+
             //   |       Output / Terminal          |
             //   +----------------------------------+
+            ImGuiID mainId   = dockspaceId;
             ImGuiID leftId   = 0;
             ImGuiID rightId  = 0;
-            ImGuiID mainId   = rootId;
-            // First split off the bottom 25% for Output/Terminal.
-            ImGuiID bottomId = ImGui::DockBuilderSplitNode(mainId, ImGuiDir_Down, 0.25f, nullptr, &mainId);
-            // Then split the remaining horizontal strip: 20% left, 20% right.
-            ImGui::DockBuilderSplitNode(mainId, ImGuiDir_Left, 0.20f, &leftId, &mainId);
+            ImGuiID bottomId = ImGui::DockBuilderSplitNode(mainId, ImGuiDir_Down,  0.25f, nullptr, &mainId);
+            ImGui::DockBuilderSplitNode(mainId, ImGuiDir_Left,  0.20f, &leftId,  &mainId);
             ImGui::DockBuilderSplitNode(mainId, ImGuiDir_Right, 0.25f, &rightId, &mainId);
-            ImGui::DockBuilderDockWindow("Explorer",  leftId);
-            ImGui::DockBuilderDockWindow("Editor",    mainId);
-            ImGui::DockBuilderDockWindow("Debugger",  rightId);
-            ImGui::DockBuilderDockWindow("Output",    bottomId);
-            ImGui::DockBuilderDockWindow("Terminal",  bottomId);
-            ImGui::DockBuilderFinish(rootId);
+
+            ImGui::DockBuilderDockWindow("Explorer", leftId);
+            ImGui::DockBuilderDockWindow("Editor",   mainId);
+            ImGui::DockBuilderDockWindow("Debugger", rightId);
+            // Output + Terminal share the bottom node; ImGui will show them
+            // as tabs in the same dock.
+            ImGui::DockBuilderDockWindow("Output",   bottomId);
+            ImGui::DockBuilderDockWindow("Terminal", bottomId);
+            ImGui::DockBuilderFinish(dockspaceId);
+            dockLayoutBuilt = true;
         }
+
+        ImGui::End(); // SF-IDE DockSpace Host
 
         if (ImGui::BeginMainMenuBar())
         {
@@ -1248,8 +1276,21 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int)
             if (ImGui::SmallButton("Clear events")) debugEvents.clear();
 
             ImGui::Separator();
-            ImGui::Columns(2, "##dbg_cols", false);
+
+            // Stack / Locals / Events are vertically stacked child regions
+            // so the right-hand debugger dock can scale them with its
+            // height. Each child claims an equal share of the remaining
+            // space (Events is shorter to keep the recent activity visible
+            // at a glance).
+            ImVec2 avail = ImGui::GetContentRegionAvail();
+            float h = avail.y;
+            // Split the column into three: Stack 40%, Locals 40%, Events 20%.
+            float stackH = h * 0.40f;
+            float locH   = h * 0.40f;
+            float evtH   = h - stackH - locH;
+
             ImGui::Text("Stack");
+            ImGui::BeginChild("##dbg_stack", ImVec2(0, stackH - ImGui::GetTextLineHeight() - 4), true);
             for (size_t i = 0; i < frames.size(); ++i)
             {
                 const auto& f = frames[i];
@@ -1258,19 +1299,20 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int)
                             f.sourceFile.empty() ? "?" : f.sourceFile.c_str(),
                             f.sourceLine);
             }
-            ImGui::NextColumn();
+            ImGui::EndChild();
+
             ImGui::Text("Locals");
+            ImGui::BeginChild("##dbg_locals", ImVec2(0, locH - ImGui::GetTextLineHeight() - 4), true);
             for (const auto& l : locals)
             {
                 ImGui::Text("%s = %s  [%s]",
                             l.name.c_str(), l.value.c_str(),
                             l.type.empty() ? "?" : l.type.c_str());
             }
-            ImGui::Columns(1);
+            ImGui::EndChild();
 
-            ImGui::Separator();
             ImGui::Text("Events");
-            ImGui::BeginChild("##dbg_events", ImVec2(0, 120), true);
+            ImGui::BeginChild("##dbg_events", ImVec2(0, evtH - ImGui::GetTextLineHeight() - 4), true);
             for (const auto& s : debugEvents) ImGui::TextUnformatted(s.c_str());
             ImGui::EndChild();
 
@@ -1279,9 +1321,9 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int)
 
         // Status bar at the very bottom of the main viewport.
         {
-            ImGuiViewport* vp = ImGui::GetMainViewport();
-            ImGui::SetNextWindowPos(ImVec2(vp->Pos.x, vp->Pos.y + vp->Size.y - 22));
-            ImGui::SetNextWindowSize(ImVec2(vp->Size.x, 22));
+            const ImGuiViewport* sbVp = ImGui::GetMainViewport();
+            ImGui::SetNextWindowPos(ImVec2(sbVp->Pos.x, sbVp->Pos.y + sbVp->Size.y - 22));
+            ImGui::SetNextWindowSize(ImVec2(sbVp->Size.x, 22));
             ImGui::Begin("##statusbar", nullptr,
                 ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
                 ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoScrollbar |

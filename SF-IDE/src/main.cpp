@@ -993,10 +993,16 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int)
         ImGui::PopStyleVar(3);
 
         ImGuiID dockspaceId = ImGui::GetID("MainDockSpace");
+        // ImGui::DockSpace() asserts that the DockSpace flag is NOT passed
+        // (it is set internally). Only PassthruCentralNode (and similar
+        // shared flags) belong here.
+        const ImGuiDockNodeFlags dockSpaceFlags = ImGuiDockNodeFlags_PassthruCentralNode;
+        // DockBuilderAddNode, on the other hand, REQUIRES the DockSpace
+        // flag so the resulting node is treated as a dockspace root.
         const ImGuiDockNodeFlags rootFlags =
             static_cast<ImGuiDockNodeFlags>(ImGuiDockNodeFlags_DockSpace |
                                             ImGuiDockNodeFlags_PassthruCentralNode);
-        ImGui::DockSpace(dockspaceId, ImVec2(0, 0), rootFlags);
+        ImGui::DockSpace(dockspaceId, ImVec2(0, 0), dockSpaceFlags);
 
         // On the very first frame after NewFrame() there is no root dock
         // node yet (imgui.ini either does not exist or has not been
@@ -1015,6 +1021,11 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int)
             //   +---------+----------------+---------+
             //   |       Output / Terminal          |
             //   +----------------------------------+
+            // Split the root into a bottom strip first; the remainder
+            // (mainId) is the central/upper region that we then split into
+            // left/center/right. We only dock into the child node ids —
+            // never into dockspaceId itself, which still carries the
+            // DockSpace flag and would trip an ImGui assert.
             ImGuiID mainId   = dockspaceId;
             ImGuiID leftId   = 0;
             ImGuiID rightId  = 0;

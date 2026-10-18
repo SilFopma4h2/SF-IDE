@@ -1,0 +1,3 @@
+[submodule "external/clil"]
+	path = external/clil
+	url = https://github.com/SilFopma4h2/clil

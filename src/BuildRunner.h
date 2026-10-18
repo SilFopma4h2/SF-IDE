@@ -1,65 +1,79 @@
-// BuildRunner drives an external MSVC + CMake build for a user project.
+// BuildRunner - runs a build command in the background and collects output.
 //
-// It uses vswhere to locate Visual Studio Build Tools, sources VsDevCmd.bat
-// to populate the environment (PATH, INCLUDE, LIB) so cl.exe / link.exe / the
-// Windows SDK are available, then runs `cmake -S <src> -B <build>` and
-// `cmake --build <build> --config Debug` asynchronously. stdout/stderr are
-// captured line-by-line and forwarded to the GUI through a callback.
+// The command runs through the user's login shell (so Homebrew / Xcode
+// tools are on PATH even when the app is started from Finder) in its own
+// process group, so Cancel stops make / cmake and every compiler they
+// started. Compiler diagnostics ("file:line:col: error: ...") are parsed
+// into a problem list.
 
 #pragma once
 
-#define WIN32_LEAN_AND_MEAN
-#include <Windows.h>
+#include <sys/types.h>
 
 #include <atomic>
-#include <functional>
+#include <mutex>
 #include <string>
 #include <thread>
 #include <vector>
 
+struct Problem {
+    std::string file;      // absolute path
+    int         line = 0;  // 1-based
+    int         col  = 0;
+    bool        error = true;
+    std::string message;
+};
+
 class BuildRunner {
 public:
-    enum class State { Idle, Configuring, Building, Succeeded, Failed, Error };
+    enum class State { Idle, Running, Succeeded, Failed, Cancelled };
 
-    struct Status {
-        State        state = State::Idle;
-        std::string  message;       // human-readable status text
-        int          exitCode = 0;  // last subprocess exit code
+    struct Line {
+        std::string text;
+        int kind = 0;   // 0 normal, 1 error, 2 warning, 3 info (our own messages)
     };
 
-    using LineCallback = std::function<void(const std::string& line, bool isError)>;
-
-    BuildRunner();
     ~BuildRunner();
 
-    // Start a configure+build cycle for a project. `projectDir` must contain a
-    // CMakeLists.txt. The runner copies the configured build directory into
-    // `<projectDir>/build`. If another build is already running, returns false.
-    bool start(const std::string& projectDir, const LineCallback& onLine);
-
-    // Cancel a running build (best-effort: terminates the child process tree).
+    bool start(const std::string& command, const std::string& dir);
     void cancel();
 
-    State state() const { return m_status.state; }
-    const Status& status() const { return m_status; }
+    State state() const { return m_state.load(); }
+    bool  running() const { return m_state.load() == State::Running; }
+    double elapsed() const;
+    const std::string& command() const { return m_command; }
+    const std::string& dir() const { return m_dir; }
 
-    // Detected Visual Studio path; empty if not found.
-    const std::string& vsInstallPath() const { return m_vsPath; }
+    // GUI thread: copies new lines / problems since the last call.
+    bool poll(std::vector<Line>& lines, std::vector<Problem>& problems);
 
-    // Last error if state() == State::Error.
-    const std::string& lastError() const { return m_status.message; }
+    void addInfo(const std::string& text);
+
+    static bool parseDiagnostic(const std::string& line, const std::string& baseDir, Problem& out);
 
 private:
     void run();
-    bool resolveToolchain();      // populates m_vsPath
 
-    Status             m_status;
-    std::atomic<bool>  m_running{false};
     std::thread        m_thread;
-    LineCallback       m_onLine;
-    std::string        m_projectDir;
-    std::string        m_vsPath;          // e.g. C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools
-    HANDLE             m_childJob = nullptr;
+    std::atomic<State> m_state{State::Idle};
+    std::atomic<pid_t> m_pid{-1};
+    std::atomic<bool>  m_cancel{false};
+    std::string        m_command, m_dir;
+    double             m_startTime = 0, m_endTime = 0;
 
-    void terminateChildTree();
+    std::mutex           m_mutex;
+    std::vector<Line>    m_newLines;
+    std::vector<Problem> m_newProblems;
 };
+
+// Picks a sensible build / run command for a project directory.
+struct ProjectCommands {
+    std::string build;
+    std::string run;      // empty: find the newest executable after building
+    std::string kind;     // "CMake", "Make", "Swift", "clil" ...
+};
+ProjectCommands detectProjectCommands(const std::string& root);
+
+// Newest executable regular file under `dir` (a few levels deep), skipping
+// CMake internals. Empty if none.
+std::string findNewestExecutable(const std::string& dir);

@@ -1,4 +1,6 @@
-// Small helpers shared by the IDE: paths, shell quoting, finding programs.
+// IdeUtil - small helpers shared by the IDE (not named Util.h: on macOS
+// that would shadow <util.h>, which declares forkpty)
+// paths, shell quoting, finding programs.
 
 #pragma once
 

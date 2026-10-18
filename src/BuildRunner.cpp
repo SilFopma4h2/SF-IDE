@@ -12,7 +12,7 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
-#include "Util.h"
+#include "IdeUtil.h"
 #include "Wake.h"
 
 extern char** environ;

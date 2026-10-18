@@ -15,7 +15,7 @@
 #include "Document.h"
 #include "Pty.h"
 #include "Syntax.h"
-#include "Util.h"
+#include "IdeUtil.h"
 #include "Vt.h"
 
 namespace fs = std::filesystem;

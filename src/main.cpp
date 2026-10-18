@@ -26,7 +26,7 @@
 
 #include "App.h"
 #include "Theme.h"
-#include "Util.h"
+#include "IdeUtil.h"
 #include "Wake.h"
 
 namespace fs = std::filesystem;

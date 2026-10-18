@@ -52,7 +52,8 @@ add_library(sfide_core STATIC
     src/Vt.cpp
     src/Pty.cpp
     src/BuildRunner.cpp
-    src/IdeUtil.cpp)
+    src/IdeUtil.cpp
+    src/IdeBridge.cpp)
 target_include_directories(sfide_core PUBLIC src)
 if(APPLE)
     target_link_libraries(sfide_core PUBLIC)

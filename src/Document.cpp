@@ -384,6 +384,41 @@ void Document::insert(const std::string& s, EditKind kind)
     replace(selMin(), selMax(), s, hasSelection() ? EditKind::Other : kind);
 }
 
+int Document::applyExternal(const std::string& text)
+{
+    const std::string& old = m_text;
+    size_t pre = 0;
+    const size_t maxPre = std::min(old.size(), text.size());
+    while (pre < maxPre && old[pre] == text[pre]) ++pre;
+    size_t suf = 0;
+    while (suf < old.size() - pre && suf < text.size() - pre &&
+           old[old.size() - 1 - suf] == text[text.size() - 1 - suf])
+        ++suf;
+    if (pre == old.size() && pre == text.size()) return 0;
+
+    const size_t from = pre, to = old.size() - suf;
+    const std::string ins = text.substr(pre, text.size() - suf - pre);
+    // Map the user's cursor / selection through the change.
+    auto map = [&](size_t p) {
+        if (p <= from) return p;
+        if (p >= to) return p - (to - from) + ins.size();
+        return from + ins.size();
+    };
+    size_t c = map(cursor), a = map(anchor);
+    int keepCol = preferredCol;
+    breakUndoGroup();
+    replace(from, to, ins, EditKind::Other);
+    breakUndoGroup();
+    cursor = std::min(c, m_text.size());
+    anchor = std::min(a, m_text.size());
+    preferredCol = keepCol;
+
+    flashFrom = lineOf(from) + 1;
+    flashTo = lineOf(from + ins.size()) + 1;
+    flashUntil = nowSeconds() + 2.5;
+    return flashFrom;
+}
+
 void Document::backspace()
 {
     if (hasSelection()) { replace(selMin(), selMax(), "", EditKind::Other); return; }

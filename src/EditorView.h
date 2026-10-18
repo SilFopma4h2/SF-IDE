@@ -28,6 +28,8 @@ public:
     void focus() { m_wantFocus = true; }
     void revealCursor() { m_revealCursor = true; }
     void gotoLine(Document& doc, int line1, int col1 = 1);
+    // Scroll so `line1` is visible without moving the cursor or taking focus.
+    void scrollToLine(int line1) { m_scrollLine = line1; }
 
     // Find support: matches are highlighted while `findText` is non-empty.
     std::string findText;
@@ -55,6 +57,7 @@ private:
     bool   matchesAt(const Document& doc, size_t pos) const;
 
     bool  m_wantFocus = false;
+    int   m_scrollLine = 0;
     bool  m_revealCursor = false;
     bool  m_dragging = false;
     bool  m_dragWords = false;

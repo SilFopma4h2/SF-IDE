@@ -325,6 +325,7 @@ void Settings::save() const
 App::App()
 {
     settings.load();
+    m_bridge.start();
     m_editor.contextMenu = [this](Document& doc) {
         if (ImGui::MenuItem("Cut", sc("X").c_str(), false, true)) m_editor.cut(doc);
         if (ImGui::MenuItem("Copy", sc("C").c_str())) m_editor.copy(doc);
@@ -834,6 +835,7 @@ void App::startClil()
     for (auto& a : splitArgs(settings.clilArgs)) argv.push_back(a);
     std::vector<std::string> env;
     if (!settings.lmHost.empty()) env.push_back("LMSTUDIO_HOST=" + settings.lmHost);
+    if (!m_bridge.socketPath().empty()) env.push_back("SFIDE_SOCKET=" + m_bridge.socketPath());
     m_clil.start(argv, m_root.empty() ? homeDir() : m_root, env);
 }
 
@@ -915,6 +917,114 @@ void App::askClilFixProblems()
                true);
 }
 
+// --- clil bridge ---------------------------------------------------------------------
+
+Document* App::findDoc(const std::string& path)
+{
+    for (auto& d : m_docs)
+        if (d->path() == path) return d.get();
+    return nullptr;
+}
+
+// Requests from clil (see IdeBridge.h). Edits land in the open tab as an
+// undoable change, are saved, and light up so the user sees them happen.
+void App::handleBridge(IdeBridge::Request& r)
+{
+    std::error_code ec;
+    std::string path = r.path.empty() ? "" : fs::weakly_canonical(r.path, ec).string();
+    if (r.op == "read")
+    {
+        Document* d = findDoc(path);
+        if (!d) { IdeBridge::reply(r, "{\"ok\":true,\"open\":false}"); return; }
+        IdeBridge::reply(r, "{\"ok\":true,\"open\":true,\"dirty\":" + std::string(d->dirty() ? "true" : "false") +
+                                ",\"text\":" + IdeBridge::quote(d->text()) + "}");
+        return;
+    }
+    if (r.op == "write")
+    {
+        if (path.empty()) { IdeBridge::reply(r, "{\"ok\":false,\"error\":\"missing path\"}"); return; }
+        Document* d = findDoc(path);
+        bool created = false;
+        if (!d)
+        {
+            auto doc = std::make_unique<Document>();
+            if (fs::exists(path, ec))
+            {
+                if (!doc->load(path))
+                {
+                    IdeBridge::reply(r, "{\"ok\":false,\"error\":" + IdeBridge::quote("cannot read " + path) + "}");
+                    return;
+                }
+            }
+            else
+            {
+                fs::create_directories(fs::path(path).parent_path(), ec);
+                if (!doc->saveAs(path))
+                {
+                    IdeBridge::reply(r, "{\"ok\":false,\"error\":" + IdeBridge::quote("cannot create " + path) + "}");
+                    return;
+                }
+                created = true;
+            }
+            m_docs.push_back(std::move(doc));
+            d = m_docs.back().get();
+            applyDiagnostics();
+        }
+        int line = d->applyExternal(r.text);
+        if (!d->save())
+        {
+            IdeBridge::reply(r, "{\"ok\":false,\"error\":" + IdeBridge::quote("cannot write " + path) + "}");
+            return;
+        }
+        m_conflicts.erase(std::remove(m_conflicts.begin(), m_conflicts.end(), d), m_conflicts.end());
+        // Show the change: switch to the tab and scroll to it, but leave the
+        // keyboard focus (usually in the clil panel) alone.
+        for (size_t i = 0; i < m_docs.size(); ++i)
+            if (m_docs[i].get() == d) { m_active = int(i); m_selectTab = int(i); }
+        if (line > 0) m_editor.scrollToLine(line);
+        if (created) m_tree.refresh();
+        m_tree.reveal(path);
+        m_status = "clil " + std::string(created ? "created " : "edited ") + d->displayName() +
+                   (line > 0 ? " (line " + std::to_string(line) + ")" : "") + "  \xC2\xB7  " + sc("Z") + " undoes it";
+        m_statusUntil = now() + 6;
+        IdeBridge::reply(r, "{\"ok\":true,\"line\":" + std::to_string(line) + "}");
+        return;
+    }
+    if (r.op == "state")
+    {
+        std::string out = "{\"ok\":true";
+        out += ",\"root\":" + IdeBridge::quote(m_root);
+        if (Document* d = activeDoc(); d && !d->path().empty())
+        {
+            int line = d->lineOf(d->cursor) + 1;
+            out += ",\"active\":" + IdeBridge::quote(rel(d->path()));
+            out += ",\"line\":" + std::to_string(line);
+            if (d->hasSelection())
+            {
+                out += ",\"sel_from\":" + std::to_string(d->lineOf(d->selMin()) + 1);
+                out += ",\"sel_to\":" + std::to_string(d->lineOf(d->selMax()) + 1);
+                std::string sel = d->selectedText();
+                if (sel.size() > 4000) sel.resize(4000);
+                out += ",\"selection\":" + IdeBridge::quote(sel);
+            }
+        }
+        std::string open = "[", unsaved = "[";
+        for (auto& d : m_docs)
+        {
+            if (d->path().empty()) continue;
+            open += (open.size() > 1 ? "," : "") + IdeBridge::quote(rel(d->path()));
+            if (d->dirty()) unsaved += (unsaved.size() > 1 ? "," : "") + IdeBridge::quote(rel(d->path()));
+        }
+        out += ",\"open\":" + open + "],\"unsaved\":" + unsaved + "]";
+        int errors = 0, warnings = 0;
+        for (const auto& p : m_problems) (p.error ? errors : warnings)++;
+        out += ",\"errors\":" + std::to_string(errors) + ",\"warnings\":" + std::to_string(warnings) + "}";
+        IdeBridge::reply(r, out);
+        return;
+    }
+    IdeBridge::reply(r, "{\"ok\":false,\"error\":\"unknown op\"}");
+}
+
 // --- Periodic work ---------------------------------------------------------------------
 
 void App::pump()
@@ -931,6 +1041,13 @@ void App::pump()
     else if (!m_debug.running())
     {
         for (auto& d : m_docs) d->execLine = 0;
+    }
+
+    IdeBridge::Request req;
+    while (m_bridge.next(req))
+    {
+        handleBridge(req);
+        changed = true;
     }
 
     static BuildRunner::State lastState = BuildRunner::State::Idle;

@@ -51,10 +51,17 @@ scrollback) running your login shell. ⌃\` toggles it.
 
 **clil, built in.** clil runs in the right-hand panel in the project folder, with its full interface
 (approvals, `/models`, `/undo`, history, ...). The IDE adds:
+- **live edits**: clil's `edit` / `write` go straight into the editor. The changed lines light up in the open
+  tab, your cursor stays where it is, the change is one ⌘Z away, and the file is saved so builds see it.
+  clil's `read` sees the editor's text, unsaved edits included;
+- **context**: each message to clil says which file you have open, the cursor line and the selected text,
+  so "explain this" or "fix the selection" just work;
 - buttons and menu items that send the right prompt: *Explain*, *Find bugs*, *Write tests* (for the
   selection or the current file), *Fix build errors* (sends the problem list), *Commit message*;
-- right-click in the editor, the explorer or a problem to ask clil about it;
-- files clil edits are reloaded in the editor straight away.
+- right-click in the editor, the explorer or a problem to ask clil about it.
+
+Under the hood SF-IDE listens on a private Unix socket (`/tmp/sf-ide-<uid>/`, only your user can connect)
+and passes it to clil as `SFIDE_SOCKET`; see `src/IdeBridge.h` for the small JSON protocol.
 
 The build bundles clil from the `external/clil` submodule, so `SF-IDE.app` contains its own copy.
 clil needs [LM Studio](https://lmstudio.ai) with its server running; set the server address, model or other
@@ -123,6 +130,7 @@ src/
   Vt.*              xterm-compatible terminal emulator
   Pty.*             processes in a pseudo terminal (shell, clil, lldb, your program)
   TerminalView.*    Pty + Vt as a panel
+  IdeBridge.*       socket through which clil reads and edits files live in the editor
   BuildRunner.*     background builds, compiler diagnostic parsing, project detection
   FileTree.*        cached project explorer
   Theme.*           dark and light colour themes

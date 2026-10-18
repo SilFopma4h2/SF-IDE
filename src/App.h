@@ -11,6 +11,7 @@
 #include "Document.h"
 #include "EditorView.h"
 #include "FileTree.h"
+#include "IdeBridge.h"
 #include "TerminalView.h"
 
 struct ImFont;
@@ -95,6 +96,8 @@ private:
     void askClilFixProblems();
     void applyDiagnostics();
     void followDebugger();
+    void handleBridge(IdeBridge::Request& r);
+    Document* findDoc(const std::string& path);
     void loadProjectConfig();
     void saveProjectConfig();
     std::string resolvedRunCommand() const;
@@ -125,6 +128,7 @@ private:
     bool m_singleFileBuild = false;
 
     TerminalView m_shell, m_clil, m_run, m_debug;
+    IdeBridge m_bridge;   // clil reads / edits files through the editor
     enum BottomTab { TabProblems, TabOutput, TabTerminal, TabRun, TabDebug } m_bottomTab = TabTerminal;
     int m_selectBottomTab = -1;
 

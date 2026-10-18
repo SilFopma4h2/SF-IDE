@@ -68,6 +68,14 @@ public:
     void backspace();
     void deleteForward();
     void deleteRange(size_t from, size_t to);
+    // Replace the whole text with `text` as an undoable edit made by another
+    // program (clil): only the changed region is touched, the user's cursor
+    // stays where it was, and the changed lines light up briefly.
+    // Returns the first changed line (1-based), 0 if nothing changed.
+    int applyExternal(const std::string& text);
+    int    flashFrom = 0, flashTo = 0;   // 1-based lines highlighted after an external edit
+    double flashUntil = 0;               // steady-clock seconds
+
     void undo();
     void redo();
     bool canUndo() const { return !m_undo.empty(); }

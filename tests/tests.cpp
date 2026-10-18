@@ -9,10 +9,13 @@
 #include <filesystem>
 #include <string>
 #include <thread>
+#include <sys/socket.h>
+#include <sys/un.h>
 #include <unistd.h>
 
 #include "BuildRunner.h"
 #include "Document.h"
+#include "IdeBridge.h"
 #include "Pty.h"
 #include "Syntax.h"
 #include "IdeUtil.h"
@@ -310,6 +313,63 @@ static void testBuildRunner()
     fs::remove_all(dir);
 }
 
+static void testBridge()
+{
+    // Request parsing, including escapes and keys we ignore.
+    IdeBridge::Request r;
+    CHECK(IdeBridge::parseRequest("{\"op\":\"write\",\"n\":3,\"x\":{\"a\":[1,\"}\"]},\"path\":\"/a b\","
+                                  "\"text\":\"l1\\n\\\"q\\\" \\u00e9 \\ud83d\\ude00\"}\n", r));
+    CHECK_EQ(r.op, std::string("write"));
+    CHECK_EQ(r.path, std::string("/a b"));
+    CHECK_EQ(r.text, std::string("l1\n\"q\" \xC3\xA9 \xF0\x9F\x98\x80"));
+    IdeBridge::Request bad;
+    CHECK(!IdeBridge::parseRequest("not json", bad));
+    CHECK_EQ(IdeBridge::quote("a\"b\n\x01"), std::string("\"a\\\"b\\n\\u0001\""));
+
+    // External edits keep the user's cursor and only touch the changed part.
+    Document d;
+    d.replace(0, 0, "one\ntwo\nthree\nfour\n");
+    d.setCursor(d.lineStart(3) + 2, false);  // "fo|ur"
+    int line = d.applyExternal("one\nTWO!\nthree\nfour\n");
+    CHECK_EQ(line, 2);
+    CHECK_EQ(d.lineOf(d.cursor), 3);
+    CHECK_EQ(d.cursor - d.lineStart(3), size_t(2));
+    CHECK_EQ(d.flashFrom, 2);
+    d.undo();
+    CHECK_EQ(std::string(d.lineText(1)), std::string("two"));
+    CHECK_EQ(d.applyExternal(d.text()), 0);
+
+    // Round trip over the socket, like clil does.
+    IdeBridge b;
+    CHECK(b.start());
+    std::thread client([&] {
+        int fd = socket(AF_UNIX, SOCK_STREAM, 0);
+        sockaddr_un a = {};
+        a.sun_family = AF_UNIX;
+        std::strcpy(a.sun_path, b.socketPath().c_str());
+        if (connect(fd, reinterpret_cast<sockaddr*>(&a), sizeof a) == 0)
+        {
+            std::string req = "{\"op\":\"state\"}\n";
+            (void)!write(fd, req.data(), req.size());
+            char buf[256] = {};
+            (void)!read(fd, buf, sizeof buf - 1);
+            CHECK_EQ(std::string(buf), std::string("{\"ok\":true}\n"));
+        }
+        close(fd);
+    });
+    IdeBridge::Request got;
+    bool have = false;
+    for (int i = 0; i < 300 && !have; ++i)
+    {
+        have = b.next(got);
+        if (!have) std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    CHECK(have && got.op == "state");
+    if (have) IdeBridge::reply(got, "{\"ok\":true}");
+    client.join();
+    b.stop();
+}
+
 static void testUtil()
 {
     CHECK_EQ(shellQuote("it's"), std::string("'it'\\''s'"));
@@ -326,6 +386,7 @@ int main()
     testSyntax();
     testDiagnostics();
     testBuildRunner();
+    testBridge();
     testUtil();
     std::printf("%d passed, %d failed\n", g_passed, g_failed);
     return g_failed == 0 ? 0 : 1;

@@ -1,6 +1,7 @@
 #include "EditorView.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cctype>
 #include <cmath>
 #include <cstring>
@@ -178,6 +179,15 @@ bool EditorView::render(Document& doc)
         wakeUi();
     }
 
+    // Show a line changed by clil without moving the cursor.
+    if (m_scrollLine > 0)
+    {
+        float ly = padTop + float(m_scrollLine - 1) * m_lineH;
+        if (ly < win->Scroll.y || ly > win->Scroll.y + viewH - m_lineH * 2)
+            win->Scroll.y = std::max(0.0f, ly - viewH * 0.35f);
+        m_scrollLine = 0;
+    }
+
     const float scrollX = win->Scroll.x, scrollY = win->Scroll.y;
     m_viewTop = inner.Min.y;
     m_viewBottom = inner.Max.y;
@@ -202,6 +212,20 @@ bool EditorView::render(Document& doc)
     if (!doc.hasSelection())
         dl->AddRectFilled(ImVec2(inner.Min.x, lineY(curLine)), ImVec2(inner.Max.x, lineY(curLine) + m_lineH),
                           th.currentLine);
+    // Lines just changed by clil fade out over a couple of seconds.
+    {
+        using namespace std::chrono;
+        double t = duration<double>(steady_clock::now().time_since_epoch()).count();
+        if (doc.flashUntil > t && doc.flashFrom > 0)
+        {
+            float alpha = float(std::min(1.0, (doc.flashUntil - t) / 1.5));
+            ImU32 c = (th.accent & 0x00FFFFFF) | (ImU32(70 * alpha) << IM_COL32_A_SHIFT);
+            int a = std::max(first, doc.flashFrom - 1), b = std::min(last, doc.flashTo - 1);
+            for (int l = a; l <= b; ++l)
+                dl->AddRectFilled(ImVec2(inner.Min.x, lineY(l)), ImVec2(inner.Max.x, lineY(l) + m_lineH), c);
+            wakeUi(2);
+        }
+    }
     if (doc.execLine > 0)  // where the debugger stopped
         dl->AddRectFilled(ImVec2(inner.Min.x, lineY(doc.execLine - 1)), ImVec2(inner.Max.x, lineY(doc.execLine - 1) + m_lineH),
                           (th.ok & 0x00FFFFFF) | (0x38u << 24));

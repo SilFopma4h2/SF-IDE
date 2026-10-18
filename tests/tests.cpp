@@ -223,7 +223,7 @@ static void testVt()
 static void testPty()
 {
     Pty p;
-    CHECK(p.start({ "/bin/sh", "-c", "printf 'cols=%s\\n' \"$(tput cols 2>/dev/null || stty size | cut -d' ' -f2)\"; read x; echo got:$x" },
+    CHECK(p.start({ "/bin/sh", "-c", "printf 'size=%s\\n' \"$(stty size)\"; read x; echo got:$x" },
                   "/", 77, 20));
     p.write("hi\r");
     std::string all, chunk;
@@ -233,7 +233,7 @@ static void testPty()
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
     if (p.take(chunk)) all += chunk;
-    CHECK(all.find("cols=77") != std::string::npos);
+    CHECK(all.find("size=20 77") != std::string::npos);
     CHECK(all.find("got:hi") != std::string::npos);
     p.stop();
     CHECK(!p.running());

@@ -3,7 +3,7 @@
 // GLFW + OpenGL 3.2 + Dear ImGui. The loop is event driven: it sleeps until
 // there is input, process output or a timer, so an idle IDE uses no CPU.
 
-#if defined(__APPLE__)
+#if defined(__APPLE__) && !defined(GL_SILENCE_DEPRECATION)
 #define GL_SILENCE_DEPRECATION
 #endif
 #include <GLFW/glfw3.h>

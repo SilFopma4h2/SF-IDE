@@ -1,5 +1,6 @@
 #include "BuildRunner.h"
 
+#include <cctype>
 #include <cerrno>
 #include <chrono>
 #include <csignal>
@@ -156,10 +157,11 @@ void BuildRunner::run()
 
     std::string partial;
     char buf[8192];
+    DiagnosticParser parser(m_dir);
     auto emit = [&](const std::string& raw) {
         std::string text = stripAnsi(raw);
         Problem p;
-        bool isDiag = parseDiagnostic(text, m_dir, p);
+        bool isDiag = parser.feed(text, p);
         int kind = 0;
         if (isDiag) kind = p.error ? 1 : 2;
         else if (text.find("error:") != std::string::npos || text.find("Error ") != std::string::npos ||
@@ -202,51 +204,282 @@ void BuildRunner::run()
     wakeUi();
 }
 
-// "path:line:col: error: message", "path:line: warning: message",
-// "path(line): error ..." is not produced by clang / gcc so it is ignored.
-bool BuildRunner::parseDiagnostic(const std::string& line, const std::string& baseDir, Problem& out)
+namespace {
+
+std::string resolvePath(const std::string& file, const std::string& baseDir)
 {
-    static const char* kinds[] = { ": error: ", ": fatal error: ", ": warning: ", ": note: " };
-    size_t kpos = std::string::npos;
-    int which = -1;
-    for (int i = 0; i < 4; ++i)
-    {
-        size_t p = line.find(kinds[i]);
-        if (p != std::string::npos && p < kpos) { kpos = p; which = i; }
-    }
-    if (kpos == std::string::npos || which == 3) return false;  // notes are noise in the list
-
-    std::string loc = line.substr(0, kpos);
-    // loc = path:line[:col]
-    int nums[2] = { 0, 0 };
-    int count = 0;
-    size_t end = loc.size();
-    for (int i = 0; i < 2; ++i)
-    {
-        size_t colon = loc.rfind(':', end - 1);
-        if (colon == std::string::npos || colon + 1 >= end) break;
-        std::string num = loc.substr(colon + 1, end - colon - 1);
-        if (num.empty() || num.find_first_not_of("0123456789") != std::string::npos) break;
-        nums[i] = std::atoi(num.c_str());
-        end = colon;
-        ++count;
-        if (end == 0) break;
-    }
-    if (count == 0) return false;
-    std::string file = loc.substr(0, end);
-    while (!file.empty() && file.front() == ' ') file.erase(0, 1);
-    if (file.empty()) return false;
-
-    out.line = count == 2 ? nums[1] : nums[0];
-    out.col = count == 2 ? nums[0] : 0;
-    out.error = which <= 1;
-    out.message = line.substr(kpos + std::strlen(kinds[which]));
     std::error_code ec;
     fs::path p(file);
     if (p.is_relative()) p = fs::path(baseDir) / p;
     fs::path canon = fs::weakly_canonical(p, ec);
-    out.file = ec ? p.lexically_normal().string() : canon.string();
+    return ec ? p.lexically_normal().string() : canon.string();
+}
+
+bool allDigits(const std::string& s)
+{
+    return !s.empty() && s.find_first_not_of("0123456789") == std::string::npos;
+}
+
+// "path:line[:col]" at the start of `loc` (the whole string). False if not.
+bool splitLocation(const std::string& loc, std::string& file, int& line, int& col)
+{
+    int nums[2] = { 0, 0 };
+    int count = 0;
+    size_t end = loc.size();
+    for (int i = 0; i < 2 && end > 0; ++i)
+    {
+        size_t colon = loc.rfind(':', end - 1);
+        if (colon == std::string::npos || colon + 1 >= end) break;
+        std::string num = loc.substr(colon + 1, end - colon - 1);
+        if (!allDigits(num)) break;
+        nums[i] = std::atoi(num.c_str());
+        end = colon;
+        ++count;
+    }
+    if (count == 0) return false;
+    file = loc.substr(0, end);
+    while (!file.empty() && file.front() == ' ') file.erase(0, 1);
+    if (file.empty() || (file.find(' ') != std::string::npos && file.find('/') == std::string::npos)) return false;
+    line = count == 2 ? nums[1] : nums[0];
+    col = count == 2 ? nums[0] : 0;
+    return line > 0;
+}
+
+bool looksLikeSource(const std::string& file)
+{
+    size_t dot = file.find_last_of('.');
+    size_t slash = file.find_last_of('/');
+    return dot != std::string::npos && (slash == std::string::npos || dot > slash) && dot + 1 < file.size() &&
+           file.size() - dot <= 6;
+}
+
+} // namespace
+
+// Single-line formats:
+//   clang / gcc / swiftc / javac / kotlinc / go vet:  path:line[:col]: error|warning: message
+//   go build / ruby -c:                               path:line[:col]: message
+//   tsc / C# / MSBuild:                               path(line,col): error CODE: message
+//   php -l:                                           ... message in path on line N
+//   bash -n:                                          path: line N: message
+bool BuildRunner::parseDiagnostic(const std::string& line, const std::string& baseDir, Problem& out)
+{
+    // tsc / dotnet: "src/a.ts(3,5): error TS2304: Cannot find name 'x'."
+    {
+        size_t paren = line.find('(');
+        size_t close = paren == std::string::npos ? paren : line.find("): ", paren);
+        if (close != std::string::npos && paren > 0 && looksLikeSource(line.substr(0, paren)))
+        {
+            std::string nums = line.substr(paren + 1, close - paren - 1);
+            size_t comma = nums.find(',');
+            std::string rest = line.substr(close + 3);
+            bool err = rest.rfind("error", 0) == 0, warn = rest.rfind("warning", 0) == 0;
+            if ((err || warn) && allDigits(nums.substr(0, comma)))
+            {
+                out.file = resolvePath(line.substr(0, paren), baseDir);
+                out.line = std::atoi(nums.c_str());
+                out.col = comma == std::string::npos ? 0 : std::atoi(nums.c_str() + comma + 1);
+                out.error = err;
+                size_t colon = rest.find(": ");
+                out.message = colon == std::string::npos ? rest : rest.substr(colon + 2);
+                return true;
+            }
+        }
+    }
+    // php: "PHP Parse error:  syntax error, unexpected ... in /p/a.php on line 3"
+    {
+        size_t on = line.rfind(" on line ");
+        size_t in = on == std::string::npos ? on : line.rfind(" in ", on);
+        if (in != std::string::npos && allDigits(line.substr(on + 9)) &&
+            (line.find("error") != std::string::npos || line.find("Warning") != std::string::npos))
+        {
+            out.file = resolvePath(line.substr(in + 4, on - in - 4), baseDir);
+            out.line = std::atoi(line.c_str() + on + 9);
+            out.col = 0;
+            out.error = line.find("Warning") == std::string::npos;
+            std::string msg = line.substr(0, in);
+            size_t colon = msg.find(":  ");
+            if (colon == std::string::npos) colon = msg.find(": ");
+            out.message = colon == std::string::npos ? msg : msg.substr(colon + (msg[colon + 2] == ' ' ? 3 : 2));
+            return true;
+        }
+    }
+    // bash -n: "script.sh: line 3: syntax error near unexpected token `fi'"
+    {
+        size_t l = line.find(": line ");
+        if (l != std::string::npos && l > 0 && looksLikeSource(line.substr(0, l)))
+        {
+            size_t colon = line.find(": ", l + 7);
+            std::string num = line.substr(l + 7, colon == std::string::npos ? std::string::npos : colon - l - 7);
+            if (allDigits(num))
+            {
+                out.file = resolvePath(line.substr(0, l), baseDir);
+                out.line = std::atoi(num.c_str());
+                out.col = 0;
+                out.error = true;
+                out.message = colon == std::string::npos ? "" : line.substr(colon + 2);
+                return true;
+            }
+        }
+    }
+
+    // gcc-style with a severity word.
+    static const char* kinds[] = { ": error: ", ": fatal error: ", ": warning: ", ": note: ", ": Error: " };
+    size_t kpos = std::string::npos;
+    int which = -1;
+    for (int i = 0; i < 5; ++i)
+    {
+        size_t p = line.find(kinds[i]);
+        if (p != std::string::npos && p < kpos) { kpos = p; which = i; }
+    }
+    if (kpos != std::string::npos)
+    {
+        if (which == 3) return false;  // notes are noise in the list
+        std::string file;
+        int ln = 0, col = 0;
+        if (!splitLocation(line.substr(0, kpos), file, ln, col)) return false;
+        out.file = resolvePath(file, baseDir);
+        out.line = ln;
+        out.col = col;
+        out.error = which != 2;
+        out.message = line.substr(kpos + std::strlen(kinds[which]));
+        return true;
+    }
+
+    // Perl: "syntax error at /p/a.pl line 1, near ..." / "Died at a.pl line 3."
+    {
+        size_t at = line.find(" at ");
+        size_t ln = at == std::string::npos ? at : line.find(" line ", at + 4);
+        if (ln != std::string::npos && line.find(' ', at + 4) == ln)
+        {
+            std::string file = line.substr(at + 4, ln - at - 4);
+            size_t e = ln + 6;
+            while (e < line.size() && std::isdigit((unsigned char)line[e])) ++e;
+            std::error_code ec;
+            if (e > ln + 6 && looksLikeSource(file) && fs::is_regular_file(resolvePath(file, baseDir), ec))
+            {
+                out.file = resolvePath(file, baseDir);
+                out.line = std::atoi(line.c_str() + ln + 6);
+                out.col = 0;
+                out.error = true;
+                out.message = line.substr(0, at);
+                return true;
+            }
+        }
+    }
+
+    // Go / Ruby / Lua: "path:line[:col]: message" for a source file that exists,
+    // possibly after the tool's name ("ruby: /p/a.rb:2: syntax error ...").
+    if (line.empty() || line[0] == ' ' || line[0] == '\t') return false;
+    {
+        size_t colon = line.find(": ");
+        if (colon != std::string::npos && colon < 16 && line.find_first_of("/.", 0) > colon &&
+            colon + 2 < line.size() && (line[colon + 2] == '/' || line[colon + 2] == '.'))
+            return parseDiagnostic(line.substr(colon + 2), baseDir, out);
+    }
+    size_t sep = std::string::npos;
+    for (size_t i = 0; i + 1 < line.size(); ++i)
+    {
+        if (line[i] == ':' && line[i + 1] == ' ')
+        {
+            sep = i;
+            break;
+        }
+    }
+    if (sep == std::string::npos) return false;
+    std::string file;
+    int ln = 0, col = 0;
+    if (!splitLocation(line.substr(0, sep), file, ln, col) || !looksLikeSource(file)) return false;
+    std::string full = resolvePath(file, baseDir);
+    std::error_code ec;
+    if (!fs::is_regular_file(full, ec)) return false;
+    out.file = full;
+    out.line = ln;
+    out.col = col;
+    std::string msg = line.substr(sep + 2);
+    out.error = msg.find("warning") != 0;
+    out.message = msg;
     return true;
+}
+
+bool DiagnosticParser::feed(const std::string& line, Problem& out)
+{
+    // Rust: "error[E0425]: cannot find value `x`" then "  --> src/main.rs:3:5".
+    if (line.rfind("error", 0) == 0 || line.rfind("warning", 0) == 0)
+    {
+        size_t colon = line.find(": ");
+        size_t w = line[0] == 'e' ? 5 : 7;  // after "error" / "warning"
+        bool head = colon != std::string::npos && line.size() > w && (line[w] == '[' || line[w] == ':');
+        if (head && line.rfind("warning: unused manifest", 0) != 0)
+        {
+            m_rustMsg = line.substr(colon + 2);
+            m_rustError = line[0] == 'e';
+        }
+    }
+    size_t arrow = line.find("--> ");
+    if (arrow != std::string::npos && !m_rustMsg.empty() && line.find_first_not_of(' ') == arrow)
+    {
+        std::string file;
+        int ln = 0, col = 0;
+        if (splitLocation(line.substr(arrow + 4), file, ln, col))
+        {
+            out.file = resolvePath(file, m_base);
+            out.line = ln;
+            out.col = col;
+            out.error = m_rustError;
+            out.message = m_rustMsg;
+            m_rustMsg.clear();
+            return true;
+        }
+    }
+
+    // Python: '  File "/p/a.py", line 3, in f' ... 'NameError: name x is not defined'.
+    {
+        size_t f = line.find("File \"");
+        size_t q = f == std::string::npos ? f : line.find("\", line ", f + 6);
+        if (q != std::string::npos)
+        {
+            std::string file = line.substr(f + 6, q - f - 6);
+            if (file.empty() || file[0] != '<')  // skip "<frozen ...>" frames
+            {
+                m_pendFile = resolvePath(file, m_base);
+                m_pendLine = std::atoi(line.c_str() + q + 8);
+            }
+            return false;
+        }
+    }
+    // Node: "/p/a.js:3" alone on a line, the error follows a few lines later.
+    if (!line.empty() && line[0] == '/' && line.find(' ') == std::string::npos)
+    {
+        std::string file;
+        int ln = 0, col = 0;
+        if (splitLocation(line, file, ln, col) && looksLikeSource(file))
+        {
+            m_pendFile = resolvePath(file, m_base);
+            m_pendLine = ln;
+            return false;
+        }
+    }
+    if (!m_pendFile.empty() && !line.empty() && line[0] != ' ')
+    {
+        // "SyntaxError: invalid syntax", "ZeroDivisionError: division by zero", "TypeError: ..."
+        size_t colon = line.find(':');
+        std::string name = line.substr(0, colon);
+        bool errorName = colon != std::string::npos && name.find(' ') == std::string::npos &&
+                         (name.size() > 5 && (name.compare(name.size() - 5, 5, "Error") == 0 ||
+                                              name.find("Exception") != std::string::npos ||
+                                              name.find("Warning") != std::string::npos));
+        if (errorName || (colon == std::string::npos && name.find("Error") != std::string::npos))
+        {
+            out.file = m_pendFile;
+            out.line = m_pendLine;
+            out.col = 0;
+            out.error = name.find("Warning") == std::string::npos;
+            out.message = line;
+            m_pendFile.clear();
+            return true;
+        }
+    }
+    return BuildRunner::parseDiagnostic(line, m_base, out);
 }
 
 // --- project detection ---------------------------------------------------------
@@ -255,6 +488,12 @@ ProjectCommands detectProjectCommands(const std::string& root)
 {
     ProjectCommands pc;
     auto has = [&](const char* name) { return fs::exists(fs::path(root) / name); };
+    auto hasExt = [&](const char* ext) {
+        std::error_code ec;
+        for (auto it = fs::directory_iterator(root, ec); !ec && it != fs::directory_iterator(); it.increment(ec))
+            if (it->path().extension() == ext) return true;
+        return false;
+    };
     long cpus = sysconf(_SC_NPROCESSORS_ONLN);
     std::string jobs = std::to_string(cpus > 0 ? cpus : 4);
     if (has("CMakeLists.txt"))
@@ -263,10 +502,17 @@ ProjectCommands detectProjectCommands(const std::string& root)
         pc.build = "( [ -f build/CMakeCache.txt ] || cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug "
                    "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON ) && cmake --build build -j " + jobs;
     }
-    else if (has("Makefile") || has("makefile") || has("GNUmakefile"))
+    else if (has("Cargo.toml"))
     {
-        pc.kind = "Make";
-        pc.build = "make -j" + jobs;
+        pc.kind = "Cargo";
+        pc.build = "cargo build --message-format short";
+        pc.run = "cargo run";
+    }
+    else if (has("go.mod"))
+    {
+        pc.kind = "Go";
+        pc.build = "go build ./... && go vet ./...";
+        pc.run = "go run .";
     }
     else if (has("Package.swift"))
     {
@@ -274,10 +520,83 @@ ProjectCommands detectProjectCommands(const std::string& root)
         pc.build = "swift build";
         pc.run = "swift run";
     }
+    else if (has("build.zig"))
+    {
+        pc.kind = "Zig";
+        pc.build = "zig build";
+        pc.run = "zig build run";
+    }
+    else if (has("package.json"))
+    {
+        // npm scripts: build / start / dev when the project defines them.
+        std::string pkg;
+        readTextFile(root + "/package.json", pkg);
+        auto script = [&](const char* name) { return pkg.find(std::string("\"") + name + "\"") != std::string::npos; };
+        std::string pm = has("pnpm-lock.yaml") ? "pnpm" : has("yarn.lock") ? "yarn" : has("bun.lockb") || has("bun.lock") ? "bun" : "npm";
+        std::string runp = pm == "npm" ? "npm run " : pm + " run ";
+        pc.kind = "Node (" + pm + ")";
+        pc.build = (has("node_modules") ? "" : pm + " install && ") +
+                   (script("build") ? runp + "build" : script("typecheck") ? runp + "typecheck"
+                    : has("tsconfig.json") ? "npx --yes tsc --noEmit --pretty false" : "true");
+        pc.run = script("dev") ? runp + "dev" : script("start") ? runp + "start" : "";
+    }
+    else if (has("deno.json") || has("deno.jsonc"))
+    {
+        pc.kind = "Deno";
+        pc.build = "deno check .";
+        pc.run = "deno task start";
+    }
+    else if (has("pom.xml"))
+    {
+        pc.kind = "Maven";
+        pc.build = (has("mvnw") ? "./mvnw" : "mvn") + std::string(" -q compile");
+        pc.run = (has("mvnw") ? "./mvnw" : "mvn") + std::string(" -q exec:java");
+    }
+    else if (has("build.gradle") || has("build.gradle.kts"))
+    {
+        std::string g = has("gradlew") ? "./gradlew" : "gradle";
+        pc.kind = "Gradle";
+        pc.build = g + " build -q";
+        pc.run = g + " run -q";
+    }
+    else if (hasExt(".sln") || hasExt(".csproj") || hasExt(".fsproj"))
+    {
+        pc.kind = ".NET";
+        pc.build = "dotnet build -nologo -clp:NoSummary";
+        pc.run = "dotnet run";
+    }
+    else if (has("mix.exs"))
+    {
+        pc.kind = "Elixir (mix)";
+        pc.build = "mix compile";
+        pc.run = "mix run";
+    }
+    else if (has("stack.yaml") || hasExt(".cabal"))
+    {
+        pc.kind = "Haskell";
+        pc.build = has("stack.yaml") ? "stack build" : "cabal build";
+        pc.run = has("stack.yaml") ? "stack run" : "cabal run";
+    }
+    else if (has("pubspec.yaml"))
+    {
+        pc.kind = "Dart";
+        pc.build = "dart analyze";
+        pc.run = "dart run";
+    }
+    else if (has("Makefile") || has("makefile") || has("GNUmakefile"))
+    {
+        pc.kind = "Make";
+        pc.build = "make -j" + jobs;
+    }
     else if (has("meson.build"))
     {
         pc.kind = "Meson";
         pc.build = "( [ -d build ] || meson setup build ) && meson compile -C build";
+    }
+    else if (has("pyproject.toml") || has("requirements.txt") || has("setup.py"))
+    {
+        // Python projects have no build step; Run uses the open file.
+        pc.kind = "Python";
     }
     return pc;
 }

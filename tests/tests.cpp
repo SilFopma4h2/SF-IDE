@@ -19,6 +19,7 @@
 #include "Pty.h"
 #include "Syntax.h"
 #include "IdeUtil.h"
+#include "Languages.h"
 #include "Vt.h"
 
 namespace fs = std::filesystem;
@@ -70,7 +71,7 @@ static void testDocument()
     CHECK(d.load(path));
     CHECK_EQ(d.lineCount(), 5);
     CHECK(d.text().find('\r') == std::string::npos);
-    CHECK(d.lang() == Document::Lang::CFamily);
+    CHECK_EQ(d.lang().id, std::string("cpp"));
     CHECK_EQ(std::string(d.lineText(2)), std::string("    return 0;"));
     CHECK_EQ(d.lineOf(d.lineStart(3)), 3);
 
@@ -136,7 +137,7 @@ static void testDocument()
     std::string cpath = tmpPath("c.c");
     writeTextFile(cpath, "a /* b\nc\nd */ e\nf \"/*\" g\nh\n");
     c.load(cpath);
-    const auto& st = c.blockCommentState();
+    const auto& st = c.lineStates();
     CHECK_EQ(int(st[1]), 1);
     CHECK_EQ(int(st[2]), 1);
     CHECK_EQ(int(st[3]), 0);
@@ -242,35 +243,119 @@ static void testPty()
     CHECK(!p.running());
 }
 
+static bool hasKind(const std::vector<syntax::Token>& toks, const std::string& line, syntax::Kind k, const char* text)
+{
+    for (auto& t : toks)
+        if (t.kind == k && line.substr(t.begin, t.end - t.begin) == text) return true;
+    return false;
+}
+
 static void testSyntax()
 {
+    const Language& cpp = languageForFile("a.cpp");
     std::vector<syntax::Token> toks;
-    syntax::tokenize(Document::Lang::CFamily, "#include <vector> // c", false, toks);
+    std::string l1 = "#include <vector> // c";
+    syntax::tokenize(cpp, l1, syntax::StateNormal, &toks);
     CHECK(!toks.empty() && toks[0].kind == syntax::Kind::Preproc);
-    bool sawString = false, sawComment = false;
-    for (auto& t : toks)
-    {
-        if (t.kind == syntax::Kind::String) sawString = true;
-        if (t.kind == syntax::Kind::Comment) sawComment = true;
-    }
-    CHECK(sawString && sawComment);
+    CHECK(hasKind(toks, l1, syntax::Kind::String, "<vector>"));
+    CHECK(hasKind(toks, l1, syntax::Kind::Comment, "// c"));
 
-    syntax::tokenize(Document::Lang::CFamily, "return foo(1.5e-3);", false, toks);
+    std::string l2 = "return foo(1.5e-3);";
+    syntax::tokenize(cpp, l2, syntax::StateNormal, &toks);
     CHECK(toks[0].kind == syntax::Kind::Keyword);
-    bool fn = false, num = false;
-    for (auto& t : toks)
-    {
-        if (t.kind == syntax::Kind::Function) fn = true;
-        if (t.kind == syntax::Kind::Number) num = true;
-    }
-    CHECK(fn && num);
+    CHECK(hasKind(toks, l2, syntax::Kind::Function, "foo"));
+    CHECK(hasKind(toks, l2, syntax::Kind::Number, "1.5e-3"));
     // Tokens cover the whole line without gaps.
     uint32_t end = 0;
     for (auto& t : toks) { CHECK_EQ(t.begin, end); end = t.end; }
-    CHECK_EQ(end, uint32_t(std::strlen("return foo(1.5e-3);")));
-
-    syntax::tokenize(Document::Lang::CFamily, "still comment */ int x;", true, toks);
+    CHECK_EQ(end, uint32_t(l2.size()));
+    CHECK_EQ(int(syntax::tokenize(cpp, "x /* open", syntax::StateNormal, nullptr)), int(syntax::StateBlockComment));
+    std::string l3 = "still comment */ int x;";
+    CHECK_EQ(int(syntax::tokenize(cpp, l3, syntax::StateBlockComment, &toks)), int(syntax::StateNormal));
     CHECK(toks[0].kind == syntax::Kind::Comment);
+
+    // Python: keywords, decorators, f-strings, triple-quoted strings over lines, '#' comments.
+    const Language& py = languageForFile("x.py");
+    std::string p1 = "@cache";
+    syntax::tokenize(py, p1, syntax::StateNormal, &toks);
+    CHECK(hasKind(toks, p1, syntax::Kind::Preproc, "@cache"));
+    std::string p2 = "def f(x): return f\"{x}\" if x else None  # done";
+    syntax::tokenize(py, p2, syntax::StateNormal, &toks);
+    CHECK(hasKind(toks, p2, syntax::Kind::Keyword, "def"));
+    CHECK(hasKind(toks, p2, syntax::Kind::String, "f\"{x}\""));
+    CHECK(hasKind(toks, p2, syntax::Kind::Number, "None"));
+    CHECK(hasKind(toks, p2, syntax::Kind::Comment, "# done"));
+    CHECK_EQ(int(syntax::tokenize(py, "s = \"\"\"doc", syntax::StateNormal, nullptr)), int(syntax::StateTripleDouble));
+    CHECK_EQ(int(syntax::tokenize(py, "end\"\"\" + x", syntax::StateTripleDouble, nullptr)), int(syntax::StateNormal));
+
+    // JavaScript template strings may span lines; Rust lifetimes are not strings.
+    const Language& js = languageForFile("app.js");
+    CHECK_EQ(int(syntax::tokenize(js, "const s = `a ${b}", syntax::StateNormal, nullptr)), int(syntax::StateBacktick));
+    const Language& rs = languageForFile("main.rs");
+    std::string r1 = "fn f<'a>(x: &'a str) -> char { println!(\"hi\"); 'x' }";
+    syntax::tokenize(rs, r1, syntax::StateNormal, &toks);
+    CHECK(hasKind(toks, r1, syntax::Kind::String, "'x'"));
+    CHECK(hasKind(toks, r1, syntax::Kind::Type, "str"));
+    CHECK(hasKind(toks, r1, syntax::Kind::Function, "println"));
+
+    // Shell variables, Lua block comments, HTML tags, SQL keywords in any case.
+    const Language& sh = languageForFile("run.sh");
+    std::string s1 = "echo \"$HOME\" ${PATH} $1 # note";
+    syntax::tokenize(sh, s1, syntax::StateNormal, &toks);
+    CHECK(hasKind(toks, s1, syntax::Kind::Preproc, "${PATH}"));
+    CHECK(hasKind(toks, s1, syntax::Kind::Comment, "# note"));
+    const Language& lua = languageForFile("a.lua");
+    CHECK_EQ(int(syntax::tokenize(lua, "--[[ start", syntax::StateNormal, nullptr)), int(syntax::StateBlockComment));
+    std::string lu = "local x = 1 -- one";
+    syntax::tokenize(lua, lu, syntax::StateNormal, &toks);
+    CHECK(hasKind(toks, lu, syntax::Kind::Comment, "-- one"));
+    const Language& html = languageForFile("index.html");
+    std::string h1 = "<a href=\"x\">it's</a>";
+    syntax::tokenize(html, h1, syntax::StateNormal, &toks);
+    CHECK(hasKind(toks, h1, syntax::Kind::Keyword, "a"));
+    CHECK(hasKind(toks, h1, syntax::Kind::Type, "href"));
+    CHECK(hasKind(toks, h1, syntax::Kind::String, "\"x\""));
+    const Language& sql = languageForFile("q.sql");
+    std::string q1 = "SELECT name FROM users -- all";
+    syntax::tokenize(sql, q1, syntax::StateNormal, &toks);
+    CHECK(hasKind(toks, q1, syntax::Kind::Keyword, "SELECT"));
+}
+
+static void testLanguages()
+{
+    auto id = [](const char* path, const char* first = "") { return languageForFile(path, first).id; };
+    CHECK_EQ(id("/a/main.c"), std::string("c"));
+    CHECK_EQ(id("x.hpp"), std::string("cpp"));
+    CHECK_EQ(id("x.h"), std::string("cpp"));
+    CHECK_EQ(id("script.py"), std::string("python"));
+    CHECK_EQ(id("App.tsx"), std::string("typescript"));
+    CHECK_EQ(id("main.go"), std::string("go"));
+    CHECK_EQ(id("lib.rs"), std::string("rust"));
+    CHECK_EQ(id("Main.java"), std::string("java"));
+    CHECK_EQ(id("Program.cs"), std::string("csharp"));
+    CHECK_EQ(id("a.swift"), std::string("swift"));
+    CHECK_EQ(id("a.kt"), std::string("kotlin"));
+    CHECK_EQ(id("a.rb"), std::string("ruby"));
+    CHECK_EQ(id("a.php"), std::string("php"));
+    CHECK_EQ(id("a.lua"), std::string("lua"));
+    CHECK_EQ(id("a.hs"), std::string("haskell"));
+    CHECK_EQ(id("a.ex"), std::string("elixir"));
+    CHECK_EQ(id("Makefile"), std::string("make"));
+    CHECK_EQ(id("CMakeLists.txt"), std::string("cmake"));
+    CHECK_EQ(id("Dockerfile"), std::string("docker"));
+    CHECK_EQ(id("notes.md"), std::string("markdown"));
+    CHECK_EQ(id("data.JSON"), std::string("json"));
+    CHECK_EQ(id("tool", "#!/usr/bin/env python3"), std::string("python"));
+    CHECK_EQ(id("tool", "#!/usr/bin/env -S node --no-warnings"), std::string("javascript"));
+    CHECK_EQ(id("tool", "#!/bin/bash"), std::string("shell"));
+    CHECK_EQ(id("README"), std::string("text"));
+    CHECK(allLanguages().size() >= 45);
+    // Every language that can be run has a command that uses the file.
+    for (const auto& L : allLanguages())
+    {
+        if (!L.run.empty()) CHECK(L.run.find("{file}") != std::string::npos || L.run.find("{out}") != std::string::npos);
+        if (L.compiled) CHECK(L.build.find("{out}") != std::string::npos);
+    }
 }
 
 static void testDiagnostics()
@@ -290,6 +375,68 @@ static void testDiagnostics()
 
     CHECK(!BuildRunner::parseDiagnostic("[ 50%] Building CXX object", "/proj", p));
     CHECK(!BuildRunner::parseDiagnostic("x.cpp:1:2: note: declared here", "/proj", p));
+
+    // TypeScript / C#.
+    CHECK(BuildRunner::parseDiagnostic("src/a.ts(3,7): error TS2304: Cannot find name 'x'.", "/p", p));
+    CHECK_EQ(p.file, std::string("/p/src/a.ts"));
+    CHECK_EQ(p.line, 3);
+    CHECK_EQ(p.col, 7);
+    CHECK_EQ(p.message, std::string("Cannot find name 'x'."));
+    CHECK(BuildRunner::parseDiagnostic("Program.cs(10,5): warning CS0168: The variable 'e' is declared", "/p", p));
+    CHECK(!p.error);
+    // PHP and bash.
+    CHECK(BuildRunner::parseDiagnostic("PHP Parse error:  syntax error, unexpected end of file in /p/a.php on line 7", "/", p));
+    CHECK_EQ(p.file, std::string("/p/a.php"));
+    CHECK_EQ(p.line, 7);
+    CHECK_EQ(p.message, std::string("syntax error, unexpected end of file"));
+    CHECK(BuildRunner::parseDiagnostic("run.sh: line 4: syntax error near unexpected token `fi'", "/p", p));
+    CHECK_EQ(p.line, 4);
+
+    // Multi-line formats through the parser.
+    std::string dir = tmpPath("diag");
+    fs::create_directories(dir);
+    writeTextFile(dir + "/a.py", "x = 1\n");
+    writeTextFile(dir + "/main.go", "package main\n");
+    {
+        DiagnosticParser dp(dir);
+        Problem q;
+        CHECK(!dp.feed("Traceback (most recent call last):", q));
+        CHECK(!dp.feed("  File \"" + dir + "/a.py\", line 1, in <module>", q));
+        CHECK(!dp.feed("    x = 1 / 0", q));
+        CHECK(dp.feed("ZeroDivisionError: division by zero", q));
+        CHECK_EQ(q.line, 1);
+        CHECK(q.file.find("a.py") != std::string::npos);
+        CHECK_EQ(q.message, std::string("ZeroDivisionError: division by zero"));
+    }
+    {
+        DiagnosticParser dp(dir);
+        Problem q;
+        CHECK(!dp.feed("error[E0425]: cannot find value `y` in this scope", q));
+        CHECK(dp.feed("  --> src/main.rs:3:13", q));
+        CHECK_EQ(q.line, 3);
+        CHECK_EQ(q.col, 13);
+        CHECK_EQ(q.message, std::string("cannot find value `y` in this scope"));
+    }
+    writeTextFile(dir + "/a.rb", "x\n");
+    writeTextFile(dir + "/a.pl", "x\n");
+    {
+        // Ruby prefixes its name; Perl says "at FILE line N".
+        Problem q;
+        CHECK(BuildRunner::parseDiagnostic("ruby: " + dir + "/a.rb:2: syntax error, unexpected end-of-input", dir, q));
+        CHECK_EQ(q.line, 2);
+        CHECK(BuildRunner::parseDiagnostic("syntax error at " + dir + "/a.pl line 1, near \"= ;\"", dir, q));
+        CHECK_EQ(q.line, 1);
+        CHECK_EQ(q.message, std::string("syntax error"));
+    }
+    {
+        // Go reports "path:line:col: message" without a severity word.
+        DiagnosticParser dp(dir);
+        Problem q;
+        CHECK(dp.feed("./main.go:5:2: undefined: fmt", q));
+        CHECK_EQ(q.line, 5);
+        CHECK(q.error);
+    }
+    fs::remove_all(dir);
 }
 
 static void testBuildRunner()
@@ -384,6 +531,7 @@ int main()
     testVt();
     testPty();
     testSyntax();
+    testLanguages();
     testDiagnostics();
     testBuildRunner();
     testBridge();

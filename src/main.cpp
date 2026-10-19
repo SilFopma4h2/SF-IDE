@@ -1,4 +1,4 @@
-// SF-IDE - a small native C/C++ IDE for macOS (and Linux) with clil built in.
+// SF-IDE - a small native IDE for macOS (and Linux) for many languages, with clil built in.
 //
 // GLFW + OpenGL 3.2 + Dear ImGui. The loop is event driven: it sleeps until
 // there is input, process output or a timer, so an idle IDE uses no CPU.

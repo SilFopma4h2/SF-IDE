@@ -141,6 +141,8 @@ void TerminalView::handleKeys()
         return;
     }
     if (cmd && ImGui::IsKeyPressed(ImGuiKey_K, false)) { clear(); return; }
+    // Ctrl+Alt combinations are IDE shortcuts on Linux (Cmd+Option on macOS is handled below).
+    if (!mac && ctrl && alt) { io.InputQueueCharacters.resize(0); return; }
     if (cmd)
     {
         // Cmd+Left / Right: start / end of line, like Terminal.app with readline.

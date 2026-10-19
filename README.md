@@ -1,6 +1,6 @@
 # SF-IDE
 
-A small, native C/C++ IDE for macOS, with the [clil](https://github.com/SilFopma4h2/clil) coding agent built in.
+A small, native IDE for macOS for C, C++, Python, Rust, Go, JavaScript and 40+ other languages, with the [clil](https://github.com/SilFopma4h2/clil) coding agent built in.
 Written in C++20 with GLFW, OpenGL and Dear ImGui. No Electron, no web view, no language server: it starts
 instantly and uses no CPU while you are not typing.
 
@@ -25,11 +25,22 @@ instantly and uses no CPU while you are not typing.
 the right. Panels cannot float, undock or pile up; you can only resize them with the dividers or hide them
 (⌘1, ⌘J, ⌘I). Panel sizes, theme and font size are remembered.
 
+**Languages.** About 50 languages are recognised by file name, extension or `#!` line, each with its own
+highlighting, comment style and indentation rules: C, C++, Objective-C, C#, Java, Kotlin, Swift, Go, Rust,
+Zig, D, Dart, Scala, Groovy, JavaScript, TypeScript, PHP, Python, Ruby, Perl, Lua, Shell, PowerShell, R,
+Julia, Elixir, Erlang, Haskell, OCaml, F#, Clojure, Lisp / Scheme, Nim, Crystal, Fortran, Pascal, Assembly,
+SQL, Solidity, GLSL / HLSL / Metal / CUDA, Protocol Buffers, GraphQL, HTML, XML, CSS / SCSS, JSON, YAML,
+TOML / INI, Makefile, CMake, Dockerfile, Markdown and LaTeX. Click the language in the status bar to change
+it for a file.
+
 **Editor**
 - Draws only the visible lines, so large files scroll smoothly.
-- Syntax highlighting for C, C++, Objective-C and friends, plus CMake / Makefile / shell / Markdown.
+- Highlighting knows multi-line comments and strings (`/* */`, `"""…"""`, JavaScript template strings,
+  Lua `--[[ ]]` ...), decorators, `$variables`, preprocessor lines, HTML tags and more.
 - macOS keys: ⌘←/→ line start/end, ⌥←/→ by word, ⌘↑/↓ file start/end, ⌥⌫ / ⌘⌫ delete word / to line start.
-- Auto-indent, Tab / ⇧Tab on selections, ⌘/ toggle comment, ⌘D duplicate line, ⌘] / ⌘[ indent.
+- Auto-indent per language (after `{`, after `:` in Python and YAML, after `do` / `then` in Ruby, Lua and
+  shell), tabs where a language needs them (Makefile, Go), Tab / ⇧Tab on selections, ⌘/ toggles the right
+  comment style (`//`, `#`, `--`, `<!-- -->` ...), ⌘D duplicate line, ⌘] / ⌘[ indent.
 - Grouped undo / redo (undoing back to the saved text marks the file clean again).
 - Find & replace (⌘F, ⌥⌘F), go to line (⌘L), quick open (⌘P), bracket matching.
 - UTF-8 throughout; CRLF files are saved as CRLF again.
@@ -37,13 +48,19 @@ the right. Panels cannot float, undock or pile up; you can only resize them with
   get a choice.
 
 **Build, run, debug**
-- Detects CMake, Make, Swift and Meson projects; a single `.c` / `.cpp` file builds on its own too.
-- ⌘B builds, ⌘R builds and runs, F5 builds and starts the debugger.
-- Compiler errors and warnings appear in **Problems**, as squiggles in the editor and as dots in the gutter;
-  click one to jump to it.
-- Programs run in a real terminal (the **Run** tab), so `scanf` and colours work.
-- Debugging uses `lldb` (or `gdb` on Linux) in the **Debug** tab. Click a line number to set a breakpoint;
-  the line where the program stopped is highlighted in the editor and follows F10 / F11.
+- Projects: CMake, Cargo, Go modules, Swift packages, Zig, npm / yarn / pnpm / bun, Deno, Maven, Gradle,
+  .NET, mix, Stack / Cabal, Dart, Make and Meson are recognised. ⌘B builds, ⌘R builds and runs.
+- Single files in any language with a compiler or interpreter: ⌥⌘R runs the open file (`python3`, `node`,
+  `go build`, `rustc`, `javac` / `java`, `ruby`, `php`, `swiftc`, `kotlinc`, `ghc`, `Rscript`, `julia`,
+  `elixir`, `lua`, `bash` ...). Without a project, ⌘R does the same.
+- Errors appear in **Problems**, as squiggles in the editor and as dots in the gutter; click one to jump to
+  it. Understood formats: clang / gcc / swiftc / javac / kotlinc, Rust, Go, TypeScript and C#, Python
+  tracebacks, Node, Ruby, PHP, Perl and Bash. A program that crashes with a traceback or panic gets the
+  failing line marked too.
+- Programs run in a real terminal (the **Run** tab), so `input()`, `scanf` and colours work.
+- Debugging (F5) uses `lldb` for C, C++, Objective-C, Swift, Rust, Go, Zig and Fortran (`gdb` on Linux) and
+  `pdb` for Python, in the **Debug** tab. Click a line number to set a breakpoint; the line where the program
+  stopped is highlighted in the editor and follows F10 / F11.
 - Build and run commands can be changed per project in **Project Settings** (saved in `.sfide`).
 
 **Terminal.** A real terminal emulator (xterm compatible: 256 / true colour, alternate screen, bracketed paste,
@@ -108,6 +125,7 @@ The app is not signed. The first time, right-click it in Finder and choose **Ope
 | ⌘L | Go to line |
 | ⌘/ | Toggle comment |
 | ⌘B / ⌘R / ⇧⌘R | Build / build & run / run without building |
+| ⌥⌘R | Run the open file |
 | ⌘. | Stop build, program or debugger |
 | F5 / F9 / F10 / F11 | Debug or continue / breakpoint / step over / step into |
 | ⌘I | Show clil |
@@ -126,12 +144,13 @@ src/
   App.*             layout, menus, commands, glue between editor, build, terminals and clil
   Document.*        text buffer, line index, undo, file I/O, change detection
   EditorView.*      editor drawing and input
-  Syntax.*          single-line tokenizer for highlighting
+  Languages.*       the language table: detection, keywords, comments, build / run / debug commands
+  Syntax.*          single-line tokenizer for highlighting, driven by the language table
   Vt.*              xterm-compatible terminal emulator
   Pty.*             processes in a pseudo terminal (shell, clil, lldb, your program)
   TerminalView.*    Pty + Vt as a panel
   IdeBridge.*       socket through which clil reads and edits files live in the editor
-  BuildRunner.*     background builds, compiler diagnostic parsing, project detection
+  BuildRunner.*     background builds, diagnostic parsing for many tools, project detection
   FileTree.*        cached project explorer
   Theme.*           dark and light colour themes
 external/clil       clil (git submodule), built and bundled into the app
@@ -145,5 +164,6 @@ and there is no background indexing.
 
 ## Not included
 
-No language server / code completion, no plug-ins, no multi-file search, no Git UI. SF-IDE 1.x (Windows,
+No language server / code completion, no plug-ins, no multi-file search, no Git UI. Languages need their own
+compiler or interpreter installed (Xcode tools, Homebrew `python`, `node`, `go`, `rust` ...). SF-IDE 1.x (Windows,
 Direct3D, Win32 debugger) is in the git history.

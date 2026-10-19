@@ -46,6 +46,7 @@ std::string leadingWhitespace(std::string_view line)
 
 bool usesTabs(const Document& doc)
 {
+    if (doc.lang().useTabs) return true;  // Makefiles need tabs; gofmt uses them
     const std::string& t = doc.text();
     size_t tabs = 0, spaces = 0;
     for (size_t i = 0; i + 1 < t.size() && i < 200000; ++i)
@@ -57,13 +58,16 @@ bool usesTabs(const Document& doc)
     return tabs > spaces;
 }
 
-const char* commentPrefix(const Document& doc)
+// Line comment marker, or the block markers for languages without one (HTML, CSS).
+void commentMarkers(const Document& doc, std::string& pre, std::string& post)
 {
-    switch (doc.lang())
+    const Language& L = doc.lang();
+    pre = L.lineComment;
+    post.clear();
+    if (pre.empty() && !L.blockStart.empty())
     {
-    case Document::Lang::CFamily: return "//";
-    case Document::Lang::Hash:    return "#";
-    default:                      return nullptr;
+        pre = L.blockStart;
+        post = L.blockEnd;
     }
 }
 
@@ -287,7 +291,7 @@ bool EditorView::render(Document& doc)
     }
 
     // Text.
-    const auto& blockState = doc.blockCommentState();
+    const auto& lineStates = doc.lineStates();
     std::vector<syntax::Token> tokens;
     std::string expanded;
     ImFont* f = ImGui::GetFont();
@@ -295,7 +299,7 @@ bool EditorView::render(Document& doc)
     for (int l = first; l <= last; ++l)
     {
         std::string_view text = doc.lineText(l);
-        syntax::tokenize(doc.lang(), text, blockState[size_t(l)] != 0, tokens);
+        syntax::tokenize(doc.lang(), text, lineStates[size_t(l)], &tokens);
         const float y = lineY(l) + textOffY;
         int col = 0;
         for (const auto& t : tokens)
@@ -551,9 +555,26 @@ void EditorView::newline(Document& doc)
     char before = p > doc.lineStart(line) ? doc.text()[p - 1] : 0;
     char after = doc.selMax() < doc.text().size() ? doc.text()[doc.selMax()] : 0;
 
-    bool opens = (before == '{' || before == '(' || before == '[') ||
-                 (before == ':' && doc.lang() == Document::Lang::Hash);
-    if (opens && doc.lang() != Document::Lang::Plain && doc.lang() != Document::Lang::Markdown)
+    const Language& L = doc.lang();
+    bool opens = (before == '{' || before == '(' || before == '[') || (before == ':' && L.indentAfterColon);
+    // Ruby / Lua / shell blocks: indent after "do", "then", "def ..." lines.
+    if (!opens && !L.braces && !L.indentAfterColon && L.id != "text" && L.id != "markdown")
+    {
+        std::string_view t = doc.lineText(line);
+        size_t ind = t.find_first_not_of(" \t");
+        std::string_view body = ind == std::string_view::npos ? std::string_view() : t.substr(ind);
+        auto endsWith = [&](std::string_view w) {
+            return body.size() >= w.size() && body.compare(body.size() - w.size(), w.size(), w) == 0 &&
+                   (body.size() == w.size() || !std::isalnum((unsigned char)body[body.size() - w.size() - 1]));
+        };
+        auto startsWord = [&](std::string_view w) {
+            return body.rfind(w, 0) == 0 && (body.size() == w.size() || body[w.size()] == ' ');
+        };
+        opens = endsWith("do") || endsWith("then") || endsWith("else") || endsWith("begin") ||
+                (L.id == "ruby" && (startsWord("def") || startsWord("class") || startsWord("module") || startsWord("if"))) ||
+                (L.id == "lua" && startsWord("function"));
+    }
+    if (opens && L.id != "text" && L.id != "markdown")
     {
         bool closes = (before == '{' && after == '}') || (before == '(' && after == ')') ||
                       (before == '[' && after == ']');
@@ -713,7 +734,7 @@ void EditorView::handleKeyboard(Document& doc)
             size_t b = doc.lineStart(l);
             std::string_view before(doc.text().data() + b, doc.selMin() - b);
             bool onlySpace = !before.empty() && before.find_first_not_of(" \t") == std::string_view::npos;
-            if (typed == "}" && onlySpace && !doc.hasSelection() && doc.lang() == Document::Lang::CFamily)
+            if (typed == "}" && onlySpace && !doc.hasSelection() && doc.lang().braces)
             {
                 // Outdent a closing brace typed on an indented empty line.
                 size_t cut = before.back() == '\t' ? 1 : std::min<size_t>(Document::kTabWidth, before.size());
@@ -841,9 +862,9 @@ void EditorView::indent(Document& doc, bool outdent)
 
 void EditorView::toggleComment(Document& doc)
 {
-    const char* prefix = commentPrefix(doc);
-    if (!prefix) return;
-    const std::string pre = prefix;
+    std::string pre, post;
+    commentMarkers(doc, pre, post);
+    if (pre.empty()) return;
     size_t s0 = doc.selMin(), s1 = doc.selMax();
     int l0 = doc.lineOf(s0), l1 = doc.lineOf(s1);
     if (l1 > l0 && s1 == doc.lineStart(l1)) --l1;
@@ -871,10 +892,18 @@ void EditorView::toggleComment(Document& doc)
             {
                 size_t n = pre.size() + (ind + pre.size() < line.size() && line[ind + pre.size()] == ' ' ? 1 : 0);
                 line.erase(ind, n);
+                if (!post.empty())
+                {
+                    while (!line.empty() && line.back() == ' ') line.pop_back();
+                    if (line.size() >= post.size() && line.compare(line.size() - post.size(), post.size(), post) == 0)
+                        line.erase(line.size() - post.size());
+                    while (!line.empty() && line.back() == ' ') line.pop_back();
+                }
             }
             else
             {
                 line.insert(minIndent, pre + " ");
+                if (!post.empty()) line += " " + post;
             }
         }
         out += line;

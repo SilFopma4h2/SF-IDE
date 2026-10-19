@@ -1,4 +1,5 @@
 #include "Document.h"
+#include "Syntax.h"
 
 #include <algorithm>
 #include <chrono>
@@ -174,24 +175,8 @@ std::string Document::displayName() const
 
 void Document::detectLang()
 {
-    std::string name = displayName();
-    std::string ext;
-    size_t dot = name.find_last_of('.');
-    if (dot != std::string::npos) ext = name.substr(dot + 1);
-    std::transform(ext.begin(), ext.end(), ext.begin(), [](unsigned char c) { return char(std::tolower(c)); });
-
-    static const char* cfam[] = { "c", "cc", "cpp", "cxx", "c++", "h", "hh", "hpp", "hxx", "inl", "ipp",
-                                  "m", "mm", "metal", "java", "js", "ts", "cs", "swift", "go", "rs", "glsl",
-                                  "vert", "frag", "json", "zig" };
-    static const char* hash[] = { "cmake", "sh", "bash", "zsh", "py", "rb", "pl", "yml", "yaml", "toml",
-                                  "mk", "conf", "ini", "txt" };
-    m_lang = Lang::Plain;
-    for (auto* e : cfam) if (ext == e) m_lang = Lang::CFamily;
-    for (auto* e : hash) if (ext == e) m_lang = Lang::Hash;
-    if (ext == "md" || ext == "markdown") m_lang = Lang::Markdown;
-    if (name == "Makefile" || name == "makefile" || name == "GNUmakefile" || name == "CMakeLists.txt" ||
-        name == "Dockerfile" || name == ".gitignore")
-        m_lang = Lang::Hash;
+    size_t nl = m_text.find('\n');
+    m_lang = &languageForFile(m_path, m_text.substr(0, nl == std::string::npos ? std::min<size_t>(m_text.size(), 200) : nl));
 }
 
 // --- Line index ---------------------------------------------------------------
@@ -479,52 +464,20 @@ void Document::toggleBreakpoint(int line1)
 
 // --- Syntax / layout caches --------------------------------------------------
 
-const std::vector<uint8_t>& Document::blockCommentState()
+const std::vector<uint8_t>& Document::lineStates()
 {
-    if (m_commentVersion == m_version) return m_commentState;
-    m_commentVersion = m_version;
-    m_commentState.assign(m_lineStarts.size(), 0);
-    if (m_lang != Lang::CFamily) return m_commentState;
-
-    // One pass over the file that knows about strings, char literals and
-    // line comments, so "/*" inside a string does not start a comment.
-    enum { Code, Block, Str, Chr, LineC } st = Code;
-    int line = 0;
-    const size_t n = m_text.size();
-    for (size_t i = 0; i < n; ++i)
+    if (m_statesVersion == m_version && m_lineStates.size() == m_lineStarts.size()) return m_lineStates;
+    m_statesVersion = m_version;
+    m_lineStates.assign(m_lineStarts.size(), syntax::StateNormal);
+    // One pass with the highlighter itself, so the states always agree with
+    // what is drawn ("/*" inside a string does not open a comment).
+    uint8_t st = syntax::StateNormal;
+    for (int l = 0; l < lineCount(); ++l)
     {
-        char c = m_text[i];
-        if (c == '\n')
-        {
-            if (st == LineC || st == Str || st == Chr) st = Code;
-            ++line;
-            m_commentState[size_t(line)] = (st == Block);
-            continue;
-        }
-        switch (st)
-        {
-        case Code:
-            if (c == '/' && i + 1 < n && m_text[i + 1] == '*') { st = Block; ++i; }
-            else if (c == '/' && i + 1 < n && m_text[i + 1] == '/') st = LineC;
-            else if (c == '"') st = Str;
-            else if (c == '\'') st = Chr;
-            break;
-        case Block:
-            if (c == '*' && i + 1 < n && m_text[i + 1] == '/') { st = Code; ++i; }
-            break;
-        case Str:
-            if (c == '\\') ++i;
-            else if (c == '"') st = Code;
-            break;
-        case Chr:
-            if (c == '\\') ++i;
-            else if (c == '\'') st = Code;
-            break;
-        case LineC:
-            break;
-        }
+        m_lineStates[size_t(l)] = st;
+        st = syntax::tokenize(*m_lang, lineText(l), st, nullptr);
     }
-    return m_commentState;
+    return m_lineStates;
 }
 
 int Document::maxColumns()

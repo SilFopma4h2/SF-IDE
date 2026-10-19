@@ -1,151 +1,149 @@
 # SF-IDE
 
-A minimal native C++ IDE for Windows. Written in C++20 with Win32, Direct3D 11, and Dear ImGui (docking). No Qt, no Electron, no webview, no editor framework — just a hand-rolled text editor, syntax highlighter, build runner, debugger, and integrated shell.
-
-The goal is a small, self-contained IDE that boots fast, edits C/C++ source without fuss, builds it with the local MSVC toolchain, and runs it under a real on-Windows debugger.
-
-## Features
-
-### Editor
-- Loads / saves UTF-8 source files, normalises CRLF ↔ LF transparently.
-- Line numbers, breakpoint gutter, click-to-toggle breakpoints.
-- C/C++ syntax highlighting (keywords, strings, char literals, numbers, preprocessor, line and block comments).
-- Selection (click + drag, Shift + arrows, Home / End, PageUp / PageDown, Ctrl+A).
-- Editing: typing, Backspace, Delete, Enter, Tab (inserts 4 spaces), copy / cut / paste.
-- Per-line undo / redo (Ctrl+Z, Ctrl+Y / Ctrl+Shift+Z).
-- Horizontal scroll for long lines; vertical scroll for large files.
-- Cursor position is accurate, mapped from mouse coordinates captured during the draw pass.
-
-### File explorer
-- Tree view of the project root.
-- Click a file to select; double-click to open it in the editor.
-- Skips `.git`, `build`, `vcpkg_installed`, and other noise directories.
-
-### Build pipeline
-- Configures and builds a CMake project under MSVC.
-- Streams stdout / stderr line-by-line into the Output pane.
-- Build can be cancelled mid-run.
-
-### Debugger
-- Native Win32 debugging API (no GDB, no MinGW).
-- INT3 (0xCC) breakpoints, resolved through `SymGetLineFromName64`.
-- Continue / Step Over / Step Into / Stop.
-- Stack frames and local variables read from the PDB through the DIA SDK.
-- Hardware single-step via the EFLAGS TRAP flag.
-
-### Terminal
-- Integrated PowerShell pane with redirected stdin / stdout / stderr.
-- Type a command, press Enter — the output streams into the same pane.
-
-## Layout
+A small, native C/C++ IDE for macOS, with the [clil](https://github.com/SilFopma4h2/clil) coding agent built in.
+Written in C++20 with GLFW, OpenGL and Dear ImGui. No Electron, no web view, no language server: it starts
+instantly and uses no CPU while you are not typing.
 
 ```
-+-----------+----------------+------------+
-|           |                |            |
-| Explorer  |     Editor     |  Debugger  |
-|           |                |            |
-+-----------+----------------+------------+
-|        Output  /  Terminal             |
-+--------------------------------------- +
-|  status: file · lines · cursor offset  |
-+--------------------------------------- +
++-----------+---------------------------------+------------------+
+| Explorer  |  main.cpp  ×   util.h           |  clil  ready     |
+|           |                                 |  [Explain] [Fix] |
+|  src/     |   1  #include <cstdio>          |                  |
+|   main.cpp|   2                             |  › explain @src/ |
+|   util.h  |   3  int main() { ... }         |  ...             |
+|           +---------------------------------+                  |
+|           | PROBLEMS  BUILD  TERMINAL  RUN  DEBUG              |
+|           | $ cmake --build build                              |
++-----------+----------------------------------------------------+
+| ⎇ main   ● 0  ▲ 0   Build succeeded        Ln 12, Col 5  C/C++ |
++----------------------------------------------------------------+
 ```
 
-The dock layout is built with `ImGui::DockBuilder`: Explorer on the left, Editor in the centre, Debugger on the right, Output and Terminal as tabs in the bottom strip. The Editor takes the largest area.
+## What's in it
+
+**Fixed layout.** Explorer on the left, the editor in the middle, the build / terminal panel below it and clil on
+the right. Panels cannot float, undock or pile up; you can only resize them with the dividers or hide them
+(⌘1, ⌘J, ⌘I). Panel sizes, theme and font size are remembered.
+
+**Editor**
+- Draws only the visible lines, so large files scroll smoothly.
+- Syntax highlighting for C, C++, Objective-C and friends, plus CMake / Makefile / shell / Markdown.
+- macOS keys: ⌘←/→ line start/end, ⌥←/→ by word, ⌘↑/↓ file start/end, ⌥⌫ / ⌘⌫ delete word / to line start.
+- Auto-indent, Tab / ⇧Tab on selections, ⌘/ toggle comment, ⌘D duplicate line, ⌘] / ⌘[ indent.
+- Grouped undo / redo (undoing back to the saved text marks the file clean again).
+- Find & replace (⌘F, ⌥⌘F), go to line (⌘L), quick open (⌘P), bracket matching.
+- UTF-8 throughout; CRLF files are saved as CRLF again.
+- Files changed on disk (by clil, git or another editor) reload automatically; if you have unsaved edits you
+  get a choice.
+
+**Build, run, debug**
+- Detects CMake, Make, Swift and Meson projects; a single `.c` / `.cpp` file builds on its own too.
+- ⌘B builds, ⌘R builds and runs, F5 builds and starts the debugger.
+- Compiler errors and warnings appear in **Problems**, as squiggles in the editor and as dots in the gutter;
+  click one to jump to it.
+- Programs run in a real terminal (the **Run** tab), so `scanf` and colours work.
+- Debugging uses `lldb` (or `gdb` on Linux) in the **Debug** tab. Click a line number to set a breakpoint;
+  the line where the program stopped is highlighted in the editor and follows F10 / F11.
+- Build and run commands can be changed per project in **Project Settings** (saved in `.sfide`).
+
+**Terminal.** A real terminal emulator (xterm compatible: 256 / true colour, alternate screen, bracketed paste,
+scrollback) running your login shell. ⌃\` toggles it.
+
+**clil, built in.** clil runs in the right-hand panel in the project folder, with its full interface
+(approvals, `/models`, `/undo`, history, ...). The IDE adds:
+- **live edits**: clil's `edit` / `write` go straight into the editor. The changed lines light up in the open
+  tab, your cursor stays where it is, the change is one ⌘Z away, and the file is saved so builds see it.
+  clil's `read` sees the editor's text, unsaved edits included;
+- **context**: each message to clil says which file you have open, the cursor line and the selected text,
+  so "explain this" or "fix the selection" just work;
+- buttons and menu items that send the right prompt: *Explain*, *Find bugs*, *Write tests* (for the
+  selection or the current file), *Fix build errors* (sends the problem list), *Commit message*;
+- right-click in the editor, the explorer or a problem to ask clil about it.
+
+Under the hood SF-IDE listens on a private Unix socket (`/tmp/sf-ide-<uid>/`, only your user can connect)
+and passes it to clil as `SFIDE_SOCKET`; see `src/IdeBridge.h` for the small JSON protocol.
+
+The build bundles clil from the `external/clil` submodule, so `SF-IDE.app` contains its own copy.
+clil needs [LM Studio](https://lmstudio.ai) with its server running; set the server address, model or other
+clil options under **Settings** (⌘,).
 
 ## Requirements
 
-- Windows 10 or 11
-- Visual Studio 2022 (MSVC, Windows SDK 10.0)
-- CMake 3.20+
-- vcpkg (manifest mode; `vcpkg.json` is checked in)
-- The `cl.exe` / `link.exe` / Windows SDK are picked up at build time by `BuildRunner` via `vswhere` and `VsDevCmd.bat`.
+- macOS 11 or later (Apple Silicon or Intel)
+- Xcode command line tools: `xcode-select --install`
+- CMake 3.20+: `brew install cmake`
+- GLFW is used from Homebrew when installed (`brew install glfw`), otherwise CMake downloads it.
+
+Linux works too (X11 / Wayland through GLFW): install `cmake`, a C++ compiler and `libglfw3-dev libgl-dev`.
 
 ## Build
 
-The repository ships a CMake preset and a vcpkg manifest. From the project root:
-
-```powershell
-# Configure (first time only; vcpkg will install imgui automatically)
-cmake -B build --preset msvc-debug
-
-# Build
-cmake --build build --config Debug
+```sh
+git clone --recursive https://github.com/SilFopma4h2/SF-IDE.git
+cd SF-IDE
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build -j
+open build/SF-IDE.app          # Linux: ./build/SF-IDE
 ```
 
-The resulting binary is `build/Debug/SF-IDE.exe`. On first launch it will look for a `CMakeLists.txt` up to four levels above the executable and pre-load `src/main.cpp` from that project so the editor is populated immediately.
+Already cloned without `--recursive`? Run `git submodule update --init` first, so clil is bundled.
 
-If you prefer the classic generator flow without presets, point CMake at the vcpkg toolchain file directly:
+- Universal binary (Apple Silicon + Intel): add `-DCMAKE_OSX_ARCHITECTURES="arm64;x86_64"`.
+- Install: drag `build/SF-IDE.app` to `/Applications`.
+- Tests: `ctest --test-dir build`.
 
-```powershell
-cmake -B build -G "Visual Studio 17 2022" -A x64 ^
-    -DCMAKE_TOOLCHAIN_FILE=C:/Users/silfo/vcpkg/scripts/buildsystems/vcpkg.cmake ^
-    -DCMAKE_BUILD_TYPE=Debug
-cmake --build build --config Debug
-```
+You can also open a folder or file directly: `open -a SF-IDE ~/code/myproject`, drag it onto the window, or
+pass it as an argument.
 
-A pre-built `SF-IDE.exe` is included in the repository root so you can run the IDE without building.
+The app is not signed. The first time, right-click it in Finder and choose **Open**.
 
-## Run
+## Keys
 
-```powershell
-.\SF-IDE.exe
-```
+| Key | Action |
+|---|---|
+| ⌘P | Quick open |
+| ⌘S / ⇧⌘S / ⌥⌘S | Save / save as / save all |
+| ⌘W | Close tab (⇧⌘[ / ⇧⌘] switch tabs) |
+| ⌘F / ⌥⌘F / ⌘G | Find / replace / find next |
+| ⌘L | Go to line |
+| ⌘/ | Toggle comment |
+| ⌘B / ⌘R / ⇧⌘R | Build / build & run / run without building |
+| ⌘. | Stop build, program or debugger |
+| F5 / F9 / F10 / F11 | Debug or continue / breakpoint / step over / step into |
+| ⌘I | Show clil |
+| ⌃\` | Toggle terminal |
+| ⌘1 / ⌘J | Toggle explorer / bottom panel |
+| ⌘+ / ⌘- / ⌘0 | Text size |
+| ⌘, | Settings |
 
-The window starts maximised. DPI is per-monitor aware (V2) so the font, gutter, and dock layout scale correctly on 4K displays.
+On Linux use Ctrl instead of ⌘.
 
-### Project layout convention
-
-The Explorer and the terminal expect a project root. Either:
-
-- launch the IDE from a directory that contains `CMakeLists.txt`, or
-- use **File → Open Folder…** to pick one. The terminal will start in the chosen directory.
-
-The current source file's directory is the default project root for **Build**.
-
-## Keyboard
-
-| Key                     | Action                       |
-| ----------------------- | ---------------------------- |
-| Arrow keys              | Move cursor (Shift = extend) |
-| Home / End              | Move to line start / end     |
-| PageUp / PageDown       | Move 20 lines                |
-| Click                   | Position cursor              |
-| Click on line number    | Toggle breakpoint            |
-| Type                    | Insert text                  |
-| Backspace / Delete      | Erase backward / forward     |
-| Enter                   | New line                     |
-| Tab                     | Insert 4 spaces              |
-| Ctrl+A                  | Select all                   |
-| Ctrl+C / Ctrl+X         | Copy / cut                   |
-| Ctrl+V                  | Paste                        |
-| Ctrl+Z / Ctrl+Y         | Undo / Redo                  |
-| Ctrl+S                  | Save (current file)          |
-| Ctrl+O                  | Open file…                   |
-| F5 / Shift+F5           | Continue / Stop              |
-| F10 / F11               | Step Over / Step Into        |
-
-## Architecture
+## Code
 
 ```
 src/
-  main.cpp            Win32 + D3D11 + ImGui host, all panels
-  Editor.h / .cpp     Plain-text buffer, cursor, selection, undo
-  BuildRunner.h/.cpp  CMake + MSVC pipeline (vswhere + VsDevCmd)
-  DebugSession.h/.cpp Win32 debug API wrapper, INT3 breakpoints
-  Terminal.h/.cpp     PowerShell with redirected pipes
-  imgui_backends/     ImGui Win32 + DX11 backends
-  app.rc, resource.h  Icon + Windows manifest
+  main.cpp          GLFW / OpenGL host, fonts (Retina), event-driven main loop
+  App.*             layout, menus, commands, glue between editor, build, terminals and clil
+  Document.*        text buffer, line index, undo, file I/O, change detection
+  EditorView.*      editor drawing and input
+  Syntax.*          single-line tokenizer for highlighting
+  Vt.*              xterm-compatible terminal emulator
+  Pty.*             processes in a pseudo terminal (shell, clil, lldb, your program)
+  TerminalView.*    Pty + Vt as a panel
+  IdeBridge.*       socket through which clil reads and edits files live in the editor
+  BuildRunner.*     background builds, compiler diagnostic parsing, project detection
+  FileTree.*        cached project explorer
+  Theme.*           dark and light colour themes
+external/clil       clil (git submodule), built and bundled into the app
+third_party/imgui   Dear ImGui 1.91.9b with the GLFW + OpenGL3 backends
+tests/tests.cpp     unit tests for the buffer, terminal, pty, tokenizer and diagnostics
 ```
 
-The text editor stores a single UTF-8 `std::string` buffer with normalised `\n` line endings. Cursor and anchor are character offsets into the buffer. Undo snapshots the whole buffer on each user edit (small files, small IDE — the simplicity is the point). The renderer draws the gutter and code area on one ImDrawList using the dummy's `GetItemRectMin()` as the canvas origin; that makes text alignment independent of ImGui's internal cursor state.
+Why it is light: the main loop sleeps in `glfwWaitEvents` until there is input or process output, the editor
+only tokenises and draws visible lines, the explorer re-reads a folder only when its modification time changes,
+and there is no background indexing.
 
-## Non-goals
+## Not included
 
-- No language server, no clangd, no IntelliSense.
-- No plug-in system, no extension API.
-- No multi-file find / replace, no refactor tools.
-- No remote / SSH support.
-- No Linux / macOS port.
-
-These are intentional; SF-IDE is meant to be a small, native, debuggable starting point, not a clone of Visual Studio.
+No language server / code completion, no plug-ins, no multi-file search, no Git UI. SF-IDE 1.x (Windows,
+Direct3D, Win32 debugger) is in the git history.

@@ -1,0 +1,54 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libglfw3-dev libgl-dev xvfb
+
+      - name: configure
+        run: |
+          if [ "$RUNNER_OS" = "macOS" ]; then EXTRA="-DCMAKE_OSX_ARCHITECTURES=arm64;x86_64"; fi
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release $EXTRA
+
+      - name: build
+        run: cmake --build build -j 4
+
+      - name: unit tests
+        run: ctest --test-dir build --output-on-failure
+
+      - name: check the app bundle (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          ls -la build/SF-IDE.app/Contents/MacOS
+          test -x build/SF-IDE.app/Contents/MacOS/clil
+          lipo -info build/SF-IDE.app/Contents/MacOS/SF-IDE
+          build/SF-IDE.app/Contents/MacOS/clil --version
+          cd build && ditto -c -k --keepParent SF-IDE.app SF-IDE-macos.zip
+
+      - name: smoke test (Linux, virtual display)
+        if: runner.os == 'Linux'
+        run: |
+          (xvfb-run -a -s "-screen 0 1440x900x24" timeout 5 build/SF-IDE . ; test $? -eq 124) && echo "SF-IDE ran for 5 s"
+
+      - uses: actions/upload-artifact@v4
+        if: runner.os == 'macOS'
+        with:
+          name: SF-IDE-macos
+          path: build/SF-IDE-macos.zip

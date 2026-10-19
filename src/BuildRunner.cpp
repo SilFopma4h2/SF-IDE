@@ -1,362 +1,317 @@
 #include "BuildRunner.h"
 
-#include <cstdio>
+#include <cerrno>
+#include <chrono>
+#include <csignal>
+#include <cstdlib>
 #include <cstring>
-#include <sstream>
-#include <string>
+#include <filesystem>
+#include <fcntl.h>
+#include <spawn.h>
+#include <sys/stat.h>
+#include <sys/wait.h>
+#include <unistd.h>
 
-// WIN32_LEAN_AND_MEAN in the header hides jobapi2.h; pull it in explicitly so
-// we can use CreateJobObject / AssignObjectToJobObject / TerminateJobObject.
-#include <jobapi2.h>
+#include "IdeUtil.h"
+#include "Wake.h"
 
-#pragma comment(lib, "advapi32.lib")
+extern char** environ;
+namespace fs = std::filesystem;
 
 namespace {
 
-// Quote a string for use as a command-line argument. Always quotes; escapes
-// embedded double-quotes by doubling them. Returns "" for empty input.
-std::string quoteArg(const std::string& s)
+double now()
 {
-    if (s.empty()) return std::string("\"\"");
+    using namespace std::chrono;
+    return duration<double>(steady_clock::now().time_since_epoch()).count();
+}
+
+std::string stripAnsi(const std::string& s)
+{
     std::string out;
-    out.reserve(s.size() + 2);
-    out.push_back('"');
-    for (char c : s)
+    out.reserve(s.size());
+    for (size_t i = 0; i < s.size(); ++i)
     {
-        if (c == '"') out.append("\"\"");
-        else          out.push_back(c);
-    }
-    out.push_back('"');
-    return out;
-}
-
-// Convert UTF-8 -> wide string (Windows command lines are wide).
-std::wstring utf8ToWide(const std::string& s)
-{
-    int len = MultiByteToWideChar(CP_UTF8, 0, s.data(),
-                                  static_cast<int>(s.size()), nullptr, 0);
-    std::wstring out(static_cast<std::size_t>(len), L'\0');
-    if (len > 0)
-        MultiByteToWideChar(CP_UTF8, 0, s.data(),
-                            static_cast<int>(s.size()), &out[0], len);
-    return out;
-}
-
-// Run a process whose stdout is captured and returned. stderr is merged into
-// stdout via the command shell. Returns false on a hard error (cannot start
-// the process). The child is added to `job` so terminating the job kills it.
-bool runCaptured(const std::wstring& cmdLine,
-                 const std::wstring& workDir,
-                 HANDLE job,
-                 std::string& output,
-                 DWORD& exitCode)
-{
-    SECURITY_ATTRIBUTES sa = {};
-    sa.nLength        = sizeof(sa);
-    sa.bInheritHandle = TRUE;
-
-    HANDLE readPipe  = nullptr;
-    HANDLE writePipe = nullptr;
-    if (!CreatePipe(&readPipe, &writePipe, &sa, 0))
-        return false;
-    SetHandleInformation(readPipe, HANDLE_FLAG_INHERIT, 0);
-
-    STARTUPINFOW si = {};
-    si.cb         = sizeof(si);
-    si.dwFlags    = STARTF_USESTDHANDLES | STARTF_USESHOWWINDOW;
-    si.hStdOutput = writePipe;
-    si.hStdError  = writePipe;
-    si.wShowWindow = SW_HIDE;
-
-    std::wstring mutableCmd = cmdLine;
-    PROCESS_INFORMATION pi = {};
-    BOOL ok = CreateProcessW(
-        nullptr, mutableCmd.data(), nullptr, nullptr, TRUE,
-        CREATE_SUSPENDED | CREATE_BREAKAWAY_FROM_JOB, nullptr,
-        workDir.empty() ? nullptr : workDir.c_str(), &si, &pi);
-    CloseHandle(writePipe);
-    if (!ok)
-    {
-        CloseHandle(readPipe);
-        return false;
-    }
-
-    if (job)
-        AssignProcessToJobObject(job, pi.hProcess);
-
-    ResumeThread(pi.hThread);
-    CloseHandle(pi.hThread);
-
-    // Read until EOF
-    char buf[4096];
-    DWORD bytesRead = 0;
-    for (;;)
-    {
-        BOOL r = ReadFile(readPipe, buf, sizeof(buf), &bytesRead, nullptr);
-        if (!r || bytesRead == 0) break;
-        output.append(buf, bytesRead);
-    }
-    CloseHandle(readPipe);
-
-    WaitForSingleObject(pi.hProcess, INFINITE);
-    GetExitCodeProcess(pi.hProcess, &exitCode);
-    CloseHandle(pi.hProcess);
-    return true;
-}
-
-// Run a process but stream each line through a callback as it arrives. Returns
-// false on a hard error. The child is added to `job` for cleanup.
-bool runStreamed(const std::wstring& cmdLine,
-                 const std::wstring& workDir,
-                 HANDLE job,
-                 const BuildRunner::LineCallback& onLine,
-                 bool isError,
-                 DWORD& exitCode)
-{
-    SECURITY_ATTRIBUTES sa = {};
-    sa.nLength        = sizeof(sa);
-    sa.bInheritHandle = TRUE;
-
-    HANDLE readPipe  = nullptr;
-    HANDLE writePipe = nullptr;
-    if (!CreatePipe(&readPipe, &writePipe, &sa, 0))
-        return false;
-    SetHandleInformation(readPipe, HANDLE_FLAG_INHERIT, 0);
-
-    STARTUPINFOW si = {};
-    si.cb           = sizeof(si);
-    si.dwFlags      = STARTF_USESTDHANDLES | STARTF_USESHOWWINDOW;
-    si.hStdOutput   = writePipe;
-    si.hStdError    = writePipe;
-    si.wShowWindow  = SW_HIDE;
-
-    std::wstring mutableCmd = cmdLine;
-    PROCESS_INFORMATION pi = {};
-    BOOL ok = CreateProcessW(
-        nullptr, mutableCmd.data(), nullptr, nullptr, TRUE,
-        CREATE_SUSPENDED | CREATE_BREAKAWAY_FROM_JOB, nullptr,
-        workDir.empty() ? nullptr : workDir.c_str(), &si, &pi);
-    CloseHandle(writePipe);
-    if (!ok)
-    {
-        CloseHandle(readPipe);
-        return false;
-    }
-
-    if (job)
-        AssignProcessToJobObject(job, pi.hProcess);
-
-    ResumeThread(pi.hThread);
-    CloseHandle(pi.hThread);
-
-    std::string line;
-    char buf[2048];
-    DWORD bytesRead = 0;
-    for (;;)
-    {
-        BOOL r = ReadFile(readPipe, buf, sizeof(buf), &bytesRead, nullptr);
-        if (!r || bytesRead == 0)
+        if (s[i] == '\x1b' && i + 1 < s.size() && s[i + 1] == '[')
         {
-            if (!line.empty()) { if (onLine) onLine(line, isError); line.clear(); }
-            break;
+            i += 2;
+            while (i < s.size() && !(s[i] >= 0x40 && s[i] <= 0x7E)) ++i;
+            continue;
         }
-        for (DWORD i = 0; i < bytesRead; ++i)
-        {
-            char c = buf[i];
-            if (c == '\n')
-            {
-                if (!line.empty() && line.back() == '\r') line.pop_back();
-                if (onLine) onLine(line, isError);
-                line.clear();
-            }
-            else if (c != '\r')
-            {
-                line.push_back(c);
-            }
-        }
+        if (s[i] == '\r') continue;
+        out.push_back(s[i]);
     }
-    CloseHandle(readPipe);
-
-    WaitForSingleObject(pi.hProcess, INFINITE);
-    GetExitCodeProcess(pi.hProcess, &exitCode);
-    CloseHandle(pi.hProcess);
-    return true;
+    return out;
 }
 
 } // namespace
 
-// --- Construction -----------------------------------------------------------
-
-BuildRunner::BuildRunner() = default;
-
 BuildRunner::~BuildRunner()
 {
     cancel();
-    // Always join if a previous start() left a joinable thread, even when
-    // m_running already cleared. We do this unconditionally: a joinable
-    // std::thread that goes out of scope without join/detach terminates.
     if (m_thread.joinable()) m_thread.join();
-    if (m_childJob) CloseHandle(m_childJob);
 }
 
-void BuildRunner::cancel()
+bool BuildRunner::start(const std::string& command, const std::string& dir)
 {
-    if (m_childJob) terminateChildTree();
-}
-
-// --- Public entry point -----------------------------------------------------
-
-bool BuildRunner::start(const std::string& projectDir, const LineCallback& onLine)
-{
-    if (m_running.load()) return false;
-
-    // A previous run may have finished (m_running == false) but the worker
-    // thread handle may still be joinable. Reassigning std::thread without
-    // joining first triggers std::terminate(), so always join here.
+    if (running()) return false;
     if (m_thread.joinable()) m_thread.join();
-
-    if (!resolveToolchain())
-    {
-        m_status.state   = State::Error;
-        m_status.message = "Could not locate Visual Studio Build Tools. "
-                           "Install Build Tools and ensure vswhere.exe is available.";
-        if (onLine) onLine(m_status.message, true);
-        return false;
-    }
-
-    // Convert project dir to an absolute path so that child tools (cmake, cmd)
-    // resolve it the same way regardless of the current working directory.
-    char abs[MAX_PATH] = {};
-    if (!GetFullPathNameA(projectDir.c_str(), MAX_PATH, abs, nullptr))
-    {
-        m_status.state   = State::Error;
-        m_status.message = "Invalid project directory: " + projectDir;
-        if (onLine) onLine(m_status.message, true);
-        return false;
-    }
-    m_projectDir = abs;
-    m_onLine     = onLine;
-    m_running.store(true);
-    m_status = {State::Configuring, "Starting...", 0};
-    if (m_childJob)
-    {
-        CloseHandle(m_childJob);
-        m_childJob = nullptr;
-    }
-    m_childJob = CreateJobObjectW(nullptr, nullptr);
-    if (m_childJob)
-    {
-        JOBOBJECT_EXTENDED_LIMIT_INFORMATION jeli = {};
-        jeli.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
-        SetInformationJobObject(m_childJob, JobObjectExtendedLimitInformation,
-                                &jeli, sizeof(jeli));
-    }
+    m_command = command;
+    m_dir = dir;
+    m_cancel = false;
+    m_startTime = now();
+    m_endTime = 0;
+    m_state = State::Running;
     m_thread = std::thread(&BuildRunner::run, this);
     return true;
 }
 
-// --- Toolchain discovery ----------------------------------------------------
-
-bool BuildRunner::resolveToolchain()
+void BuildRunner::cancel()
 {
-    // Use vswhere.exe to find any VS / Build Tools installation that includes
-    // the C++ x64 toolset. This is the supported way and avoids hardcoding
-    // a specific MSVC version.
-    const std::string vswhere =
-        "C:\\Program Files (x86)\\Microsoft Visual Studio\\Installer\\vswhere.exe";
-    if (GetFileAttributesA(vswhere.c_str()) == INVALID_FILE_ATTRIBUTES)
-        return false;
+    if (!running()) return;
+    m_cancel = true;
+    pid_t pid = m_pid.load();
+    if (pid > 0) kill(-pid, SIGTERM);  // the whole process group
+}
 
-    std::string out;
-    DWORD code = 0;
-    std::wstring cmd = L"\"" + utf8ToWide(vswhere) +
-        L"\" -latest -products * "
-        L"-requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 "
-        L"-property installationPath";
-    if (!runCaptured(cmd, {}, nullptr, out, code))
-        return false;
-    if (code != 0) return false;
+double BuildRunner::elapsed() const
+{
+    if (m_startTime == 0) return 0;
+    return (m_endTime > 0 ? m_endTime : now()) - m_startTime;
+}
 
-    while (!out.empty() && (out.back() == '\r' || out.back() == '\n' || out.back() == ' '))
-        out.pop_back();
-    if (out.empty()) return false;
-    m_vsPath = out;
+void BuildRunner::addInfo(const std::string& text)
+{
+    std::lock_guard<std::mutex> lock(m_mutex);
+    m_newLines.push_back({ text, 3 });
+}
+
+bool BuildRunner::poll(std::vector<Line>& lines, std::vector<Problem>& problems)
+{
+    std::lock_guard<std::mutex> lock(m_mutex);
+    if (m_newLines.empty() && m_newProblems.empty()) return false;
+    for (auto& l : m_newLines) lines.push_back(std::move(l));
+    for (auto& p : m_newProblems) problems.push_back(std::move(p));
+    m_newLines.clear();
+    m_newProblems.clear();
     return true;
 }
 
-// --- Run thread -------------------------------------------------------------
-
 void BuildRunner::run()
 {
-    // Build a VsDevCmd call that sets up the MSVC + Win SDK environment, then
-    // runs our command. We use cmd.exe so the "call" and "&&" syntax works.
-    auto buildCmd = [&](const std::string& command, const std::string& workDir) -> bool {
-        std::wstring devCmd = utf8ToWide(m_vsPath) + L"\\Common7\\Tools\\VsDevCmd.bat";
-        std::string devCmdUtf8 = m_vsPath + "\\Common7\\Tools\\VsDevCmd.bat";
+    int pipefd[2];
+    if (pipe(pipefd) != 0)
+    {
+        addInfo(std::string("cannot create pipe: ") + std::strerror(errno));
+        m_state = State::Failed;
+        wakeUi();
+        return;
+    }
 
-        // Put the vswhere directory on PATH so the Visual Studio CMake
-        // generator can locate Visual Studio during configuration.
-        std::ostringstream full;
-        full << "set \"PATH="
-             << "C:\\Program Files (x86)\\Microsoft Visual Studio\\Installer;"
-             << "%PATH%\" && "
-             << "call \"" << devCmdUtf8
-             << "\" -arch=x64 -host_arch=x64 -no_logo >nul && " << command;
-        std::wstring wcmd = L"cmd.exe /d /c \"" + utf8ToWide(full.str()) + L"\"";
+    posix_spawn_file_actions_t fa;
+    posix_spawn_file_actions_init(&fa);
+    posix_spawn_file_actions_addclose(&fa, pipefd[0]);
+    posix_spawn_file_actions_adddup2(&fa, pipefd[1], 1);
+    posix_spawn_file_actions_adddup2(&fa, pipefd[1], 2);
+    posix_spawn_file_actions_addclose(&fa, pipefd[1]);
+    posix_spawn_file_actions_addopen(&fa, 0, "/dev/null", O_RDONLY, 0);
 
-        DWORD exit = 0;
-        bool ok = runStreamed(wcmd, utf8ToWide(workDir), m_childJob, m_onLine, false, exit);
-        m_status.exitCode = static_cast<int>(exit);
-        return ok && exit == 0;
+    posix_spawnattr_t attr;
+    posix_spawnattr_init(&attr);
+    posix_spawnattr_setflags(&attr, POSIX_SPAWN_SETPGROUP);
+    posix_spawnattr_setpgroup(&attr, 0);
+
+    // `cd` inside the shell: posix_spawn_file_actions_addchdir is not portable.
+    std::string shell = userShell();
+    std::string script = "cd " + shellQuote(m_dir) + " && " + m_command;
+    std::vector<std::string> argvS = { shell, "-l", "-c", script };
+    if (shell == "/bin/sh") argvS = { shell, "-c", script };
+    std::vector<char*> argv;
+    for (auto& a : argvS) argv.push_back(a.data());
+    argv.push_back(nullptr);
+
+    // Plain output is easier to parse; tools still print colour on request.
+    std::vector<std::string> envS;
+    for (char** e = environ; *e; ++e)
+        if (std::strncmp(*e, "CLICOLOR_FORCE=", 15) != 0) envS.push_back(*e);
+    envS.push_back("TERM=dumb");
+    std::vector<char*> envp;
+    for (auto& e : envS) envp.push_back(e.data());
+    envp.push_back(nullptr);
+
+    pid_t pid = -1;
+    int rc = posix_spawn(&pid, argv[0], &fa, &attr, argv.data(), envp.data());
+    posix_spawn_file_actions_destroy(&fa);
+    posix_spawnattr_destroy(&attr);
+    close(pipefd[1]);
+    if (rc != 0)
+    {
+        close(pipefd[0]);
+        addInfo(std::string("cannot start shell: ") + std::strerror(rc));
+        m_state = State::Failed;
+        wakeUi();
+        return;
+    }
+    m_pid = pid;
+
+    std::string partial;
+    char buf[8192];
+    auto emit = [&](const std::string& raw) {
+        std::string text = stripAnsi(raw);
+        Problem p;
+        bool isDiag = parseDiagnostic(text, m_dir, p);
+        int kind = 0;
+        if (isDiag) kind = p.error ? 1 : 2;
+        else if (text.find("error:") != std::string::npos || text.find("Error ") != std::string::npos ||
+                 text.rfind("make: ***", 0) == 0)
+            kind = 1;
+        std::lock_guard<std::mutex> lock(m_mutex);
+        m_newLines.push_back({ text, kind });
+        if (isDiag) m_newProblems.push_back(std::move(p));
     };
-
-    // 1) Configure
-    const std::string buildDir = m_projectDir + "\\build";
+    for (;;)
     {
-        std::ostringstream cmd;
-        cmd << "cmake -S \"" << m_projectDir << "\" -B \"" << buildDir << "\""
-            << " -G \"Visual Studio 17 2022\" -A x64"
-            << " -DCMAKE_BUILD_TYPE=Debug";
-        m_status.message = "Configuring with CMake...";
-        if (m_onLine) m_onLine(m_status.message, false);
-        if (!buildCmd(cmd.str(), m_projectDir))
+        ssize_t n = read(pipefd[0], buf, sizeof buf);
+        if (n < 0 && errno == EINTR) continue;
+        if (n <= 0) break;
+        partial.append(buf, size_t(n));
+        size_t pos;
+        bool any = false;
+        while ((pos = partial.find('\n')) != std::string::npos)
         {
-            m_status.state   = State::Failed;
-            m_status.message = "Build failed (configure)";
-            if (m_onLine) m_onLine(m_status.message, true);
-            m_running.store(false);
-            return;
+            emit(partial.substr(0, pos));
+            partial.erase(0, pos + 1);
+            any = true;
         }
+        if (any) wakeUi();
     }
+    if (!partial.empty()) emit(partial);
+    close(pipefd[0]);
 
-    // 2) Build
-    m_status.state   = State::Building;
-    m_status.message = "Building (Debug)...";
-    if (m_onLine) m_onLine(m_status.message, false);
-    {
-        std::ostringstream cmd;
-        cmd << "cmake --build \"" << buildDir << "\" --config Debug --parallel";
-        if (!buildCmd(cmd.str(), m_projectDir))
-        {
-            m_status.state   = State::Failed;
-            m_status.message = "Build failed (compile/link)";
-            if (m_onLine) m_onLine(m_status.message, true);
-            m_running.store(false);
-            return;
-        }
-    }
-
-    m_status.state   = State::Succeeded;
-    m_status.message = "Build succeeded";
-    if (m_onLine) m_onLine(m_status.message, false);
-    m_running.store(false);
+    int status = 0;
+    while (waitpid(pid, &status, 0) < 0 && errno == EINTR) {}
+    m_pid = -1;
+    m_endTime = now();
+    int code = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+    if (m_cancel) m_state = State::Cancelled;
+    else m_state = (code == 0) ? State::Succeeded : State::Failed;
+    char msg[128];
+    std::snprintf(msg, sizeof msg, "%s in %.1fs (exit %d)",
+                  m_cancel ? "Cancelled" : (code == 0 ? "Build succeeded" : "Build failed"), elapsed(), code);
+    addInfo(msg);
+    wakeUi();
 }
 
-void BuildRunner::terminateChildTree()
+// "path:line:col: error: message", "path:line: warning: message",
+// "path(line): error ..." is not produced by clang / gcc so it is ignored.
+bool BuildRunner::parseDiagnostic(const std::string& line, const std::string& baseDir, Problem& out)
 {
-    if (m_childJob)
+    static const char* kinds[] = { ": error: ", ": fatal error: ", ": warning: ", ": note: " };
+    size_t kpos = std::string::npos;
+    int which = -1;
+    for (int i = 0; i < 4; ++i)
     {
-        // TerminateProcess on the job kills every process assigned to it.
-        TerminateJobObject(m_childJob, 1);
+        size_t p = line.find(kinds[i]);
+        if (p != std::string::npos && p < kpos) { kpos = p; which = i; }
     }
+    if (kpos == std::string::npos || which == 3) return false;  // notes are noise in the list
+
+    std::string loc = line.substr(0, kpos);
+    // loc = path:line[:col]
+    int nums[2] = { 0, 0 };
+    int count = 0;
+    size_t end = loc.size();
+    for (int i = 0; i < 2; ++i)
+    {
+        size_t colon = loc.rfind(':', end - 1);
+        if (colon == std::string::npos || colon + 1 >= end) break;
+        std::string num = loc.substr(colon + 1, end - colon - 1);
+        if (num.empty() || num.find_first_not_of("0123456789") != std::string::npos) break;
+        nums[i] = std::atoi(num.c_str());
+        end = colon;
+        ++count;
+        if (end == 0) break;
+    }
+    if (count == 0) return false;
+    std::string file = loc.substr(0, end);
+    while (!file.empty() && file.front() == ' ') file.erase(0, 1);
+    if (file.empty()) return false;
+
+    out.line = count == 2 ? nums[1] : nums[0];
+    out.col = count == 2 ? nums[0] : 0;
+    out.error = which <= 1;
+    out.message = line.substr(kpos + std::strlen(kinds[which]));
+    std::error_code ec;
+    fs::path p(file);
+    if (p.is_relative()) p = fs::path(baseDir) / p;
+    fs::path canon = fs::weakly_canonical(p, ec);
+    out.file = ec ? p.lexically_normal().string() : canon.string();
+    return true;
+}
+
+// --- project detection ---------------------------------------------------------
+
+ProjectCommands detectProjectCommands(const std::string& root)
+{
+    ProjectCommands pc;
+    auto has = [&](const char* name) { return fs::exists(fs::path(root) / name); };
+    long cpus = sysconf(_SC_NPROCESSORS_ONLN);
+    std::string jobs = std::to_string(cpus > 0 ? cpus : 4);
+    if (has("CMakeLists.txt"))
+    {
+        pc.kind = "CMake";
+        pc.build = "( [ -f build/CMakeCache.txt ] || cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug "
+                   "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON ) && cmake --build build -j " + jobs;
+    }
+    else if (has("Makefile") || has("makefile") || has("GNUmakefile"))
+    {
+        pc.kind = "Make";
+        pc.build = "make -j" + jobs;
+    }
+    else if (has("Package.swift"))
+    {
+        pc.kind = "Swift";
+        pc.build = "swift build";
+        pc.run = "swift run";
+    }
+    else if (has("meson.build"))
+    {
+        pc.kind = "Meson";
+        pc.build = "( [ -d build ] || meson setup build ) && meson compile -C build";
+    }
+    return pc;
+}
+
+std::string findNewestExecutable(const std::string& dir)
+{
+    std::error_code ec;
+    std::string best;
+    std::filesystem::file_time_type bestTime{};
+    auto it = fs::recursive_directory_iterator(dir, fs::directory_options::skip_permission_denied, ec);
+    for (; !ec && it != fs::recursive_directory_iterator(); it.increment(ec))
+    {
+        const auto& p = it->path();
+        std::string name = p.filename().string();
+        if (it->is_directory(ec))
+        {
+            bool bundle = name.size() > 5 && name.compare(name.size() - 5, 5, ".dSYM") == 0;
+            if (name == "CMakeFiles" || name == ".git" || name == "_deps" || bundle || it.depth() >= 3)
+                it.disable_recursion_pending();
+            continue;
+        }
+        if (!it->is_regular_file(ec)) continue;
+        struct stat st;
+        if (stat(p.c_str(), &st) != 0 || !(st.st_mode & S_IXUSR)) continue;
+        std::string ext = p.extension().string();
+        if (ext == ".sh" || ext == ".py" || ext == ".dylib" || ext == ".so" || ext == ".a" || ext == ".o" ||
+            name.find(".so.") != std::string::npos)
+            continue;
+        auto t = it->last_write_time(ec);
+        if (best.empty() || t > bestTime)
+        {
+            best = p.string();
+            bestTime = t;
+        }
+    }
+    return best;
 }

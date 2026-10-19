@@ -255,6 +255,26 @@ ImU32 withAlpha(ImU32 c, int a)
     return (c & 0x00FFFFFF) | (ImU32(a) << IM_COL32_A_SHIFT);
 }
 
+// The SF-IDE mark (same geometry as resources/SF-IDE.icns, on a 100-unit
+// grid): a paper tile with an ink prompt chevron and an ember cursor.
+void drawLogo(ImDrawList* dl, ImVec2 p, float size, bool dark)
+{
+    const float u = size / 100.0f;
+    const ImU32 paper = dark ? IM_COL32(42, 41, 38, 255) : IM_COL32(244, 241, 234, 255);
+    const ImU32 edge = dark ? IM_COL32(58, 56, 52, 255) : IM_COL32(226, 221, 209, 255);
+    const ImU32 ink = dark ? IM_COL32(244, 241, 234, 255) : IM_COL32(28, 27, 25, 255);
+    const ImU32 ember = IM_COL32(226, 112, 58, 255);
+    auto at = [&](float x, float y) { return ImVec2(p.x + x * u, p.y + y * u); };
+    dl->AddRectFilled(p, at(100, 100), edge, 22.5f * u);
+    dl->AddRectFilled(at(1, 1), at(99, 99), paper, 21.5f * u);
+    // Small sizes get a heavier stroke so the mark stays legible.
+    const float stroke = (size < 40 ? 10.0f : 7.5f) * u;
+    const ImVec2 pts[3] = { at(31, 35), at(47, 50), at(31, 65) };
+    dl->AddPolyline(pts, 3, ink, ImDrawFlags_None, stroke);
+    for (const ImVec2& q : pts) dl->AddCircleFilled(q, stroke * 0.5f, ink);
+    dl->AddRectFilled(at(53, 60.5f), at(70, size < 40 ? 69.0f : 67.5f), ember, 3.5f * u);
+}
+
 } // namespace
 
 // --- Settings -----------------------------------------------------------------------
@@ -1579,9 +1599,13 @@ void App::drawToolbarButtons()
     ImVec2 ts = ImGui::CalcTextSize(title.c_str());
     float w = ImGui::GetWindowWidth();
     float saveX = ImGui::GetCursorPosX();
-    if (saveX < w * 0.5f - ts.x * 0.5f - 20)
+    if (saveX < w * 0.5f - ts.x * 0.5f - 40)
     {
+        // Small logo before the project name.
+        float logo = std::floor(ImGui::GetTextLineHeight() * 1.15f);
         ImGui::SetCursorPosX(w * 0.5f - ts.x * 0.5f);
+        ImVec2 tp = ImGui::GetCursorScreenPos();
+        drawLogo(ImGui::GetWindowDrawList(), ImVec2(tp.x - logo - 8, tp.y + (ImGui::GetFrameHeight() - logo) * 0.5f), logo, t.dark);
         ImGui::PushStyleColor(ImGuiCol_Text, col4(t.textDim));
         ImGui::TextUnformatted(title.c_str());
         ImGui::PopStyleColor();
@@ -1931,11 +1955,20 @@ void App::drawWelcome()
     float colW = std::min(460.0f, avail.x - 40);
     ImGui::SetCursorPos(ImVec2((avail.x - colW) * 0.5f, std::max(30.0f, avail.y * 0.18f)));
     ImGui::BeginGroup();
-    ImGui::PushFont(monoFont);
-    ImGui::SetWindowFontScale(2.0f);
-    ImGui::TextUnformatted("SF-IDE");
-    ImGui::SetWindowFontScale(1.0f);
-    ImGui::PopFont();
+    {
+        // Logo and wordmark.
+        const float logo = 56.0f;
+        ImVec2 p = ImGui::GetCursorScreenPos();
+        drawLogo(ImGui::GetWindowDrawList(), p, logo, t.dark);
+        ImGui::Dummy(ImVec2(logo, logo));
+        ImGui::SameLine(0, 16);
+        ImGui::SetWindowFontScale(2.0f);
+        float th = ImGui::GetTextLineHeight();
+        ImGui::SetCursorPosY(ImGui::GetCursorPosY() + (logo - th) * 0.5f);
+        ImGui::TextUnformatted("SF-IDE");
+        ImGui::SetWindowFontScale(1.0f);
+        ImGui::Dummy(ImVec2(0, 6));
+    }
     ImGui::PushStyleColor(ImGuiCol_Text, col4(t.textDim));
     ImGui::TextUnformatted("A small, native IDE for C, C++, Python, Rust, Go, JavaScript and many more, with clil built in.");
     ImGui::PopStyleColor();

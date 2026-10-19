@@ -1,8 +1,9 @@
-// Syntax - a fast single-line tokenizer for highlighting.
+// Syntax - a fast single-line tokenizer for highlighting, driven by the
+// language table in Languages.h.
 //
-// Lines are tokenised on demand (only the visible ones); the only state
-// carried between lines is "inside a block comment", which Document
-// precomputes once per edit.
+// Lines are tokenised on demand (only the visible ones). The only state
+// carried from one line to the next is whether it starts inside a block
+// comment or a multi-line string; Document precomputes that once per edit.
 
 #pragma once
 
@@ -10,7 +11,7 @@
 #include <string_view>
 #include <vector>
 
-#include "Document.h"
+struct Language;
 
 namespace syntax {
 
@@ -21,7 +22,11 @@ struct Token {
     Kind     kind;
 };
 
-// Fills `out` with tokens covering the whole line, in order.
-void tokenize(Document::Lang lang, std::string_view line, bool startsInBlockComment, std::vector<Token>& out);
+// Line states: what a line starts inside of.
+enum : uint8_t { StateNormal = 0, StateBlockComment, StateTripleDouble, StateTripleSingle, StateBacktick };
+
+// Fills `out` (when not null) with tokens covering the whole line, in order,
+// and returns the state the next line starts in.
+uint8_t tokenize(const Language& lang, std::string_view line, uint8_t startState, std::vector<Token>* out);
 
 } // namespace syntax

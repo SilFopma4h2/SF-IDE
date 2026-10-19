@@ -49,6 +49,7 @@ target_link_libraries(imgui PUBLIC glfw OpenGL::GL)
 add_library(sfide_core STATIC
     src/Document.cpp
     src/Syntax.cpp
+    src/Languages.cpp
     src/Vt.cpp
     src/Pty.cpp
     src/BuildRunner.cpp

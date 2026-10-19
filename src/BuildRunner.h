@@ -49,6 +49,7 @@ public:
 
     void addInfo(const std::string& text);
 
+    // One line of compiler / interpreter output -> a problem, when it is one.
     static bool parseDiagnostic(const std::string& line, const std::string& baseDir, Problem& out);
 
 private:
@@ -64,6 +65,24 @@ private:
     std::mutex           m_mutex;
     std::vector<Line>    m_newLines;
     std::vector<Problem> m_newProblems;
+};
+
+// Reads tool output line by line and recognises diagnostics, including the
+// ones that span lines: Python tracebacks, Rust's "error: ...\n --> file:l:c",
+// Node's "file:line\n...\nSyntaxError: ...".
+class DiagnosticParser {
+public:
+    explicit DiagnosticParser(std::string baseDir) : m_base(std::move(baseDir)) {}
+    bool feed(const std::string& line, Problem& out);
+
+private:
+    std::string m_base;
+    // Rust: the message waits for its location line.
+    std::string m_rustMsg;
+    bool m_rustError = true;
+    // Python / Node: the location waits for the message line.
+    std::string m_pendFile;
+    int m_pendLine = 0;
 };
 
 // Picks a sensible build / run command for a project directory.

@@ -73,6 +73,7 @@ private:
     void drawPopups();
     void drawQuickOpen();
     void drawSettings();
+    void drawLanguagePicker();
     bool splitter(const char* id, bool vertical, float x, float y, float len, float& value, float sign,
                   float minV, float maxV);
     void panelHeader(const char* title);
@@ -84,7 +85,15 @@ private:
     bool saveDoc(Document& doc, bool forceDialog = false);
     void saveAll();
     void closeDoc(int index, bool force = false);
-    void build(int then);
+    void build(int then, bool currentFile = false);
+    bool projectMode() const;                 // a project build / run command applies
+    void runCurrentFile() { build(AfterRun, true); }
+    void debugCurrentFile();
+    void startDebug();                        // F5: project or current file, whichever applies
+    void debugPython(const std::string& file);
+    std::string expandTemplate(const std::string& tpl, const std::string& file) const;
+    void collectRunProblems();
+    void debugCommand(const char* lldbCmd, const char* pdbCmd);
     void runProgram();
     void debugProgram();
     void stopAll();
@@ -126,6 +135,11 @@ private:
     ProjectCommands m_cmds;        // detected
     std::string m_buildCmd, m_runCmd, m_runArgs;   // project config (.sfide), empty = detected
     bool m_singleFileBuild = false;
+    std::string m_fileRunCmd;      // run command for the current-file workflow
+    std::string m_fileRunDir;
+    bool m_debugPdb = false;       // the Debug tab runs pdb (Python) rather than lldb / gdb
+    bool m_runWasRunning = false;
+    bool m_openLangPicker = false;
 
     TerminalView m_shell, m_clil, m_run, m_debug;
     IdeBridge m_bridge;   // clil reads / edits files through the editor

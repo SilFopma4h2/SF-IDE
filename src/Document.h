@@ -14,6 +14,8 @@
 #include <string_view>
 #include <vector>
 
+#include "Languages.h"
+
 struct Diagnostic {
     int         line = 0;     // 1-based
     int         col  = 0;     // 1-based, 0 = whole line
@@ -23,7 +25,6 @@ struct Diagnostic {
 
 class Document {
 public:
-    enum class Lang { Plain, CFamily, Hash, Markdown };
     enum class EditKind { Other, Insert, Delete };
 
     // Load / save ---------------------------------------------------------------
@@ -37,7 +38,8 @@ public:
     const std::string& path() const { return m_path; }
     std::string displayName() const;
     bool dirty() const { return m_dirty; }
-    Lang lang() const { return m_lang; }
+    const Language& lang() const { return *m_lang; }
+    void setLanguage(const Language& l) { m_lang = &l; ++m_version; }
     uint64_t version() const { return m_version; }
 
     // Text access ----------------------------------------------------------------
@@ -88,8 +90,9 @@ public:
     void toggleBreakpoint(int line1);
     int execLine = 0;  // 1-based line where the debugger is stopped, 0 = none
 
-    // Syntax state: whether line i starts inside a block comment. Updated lazily.
-    const std::vector<uint8_t>& blockCommentState();
+    // Syntax state each line starts in (syntax::State*: block comment,
+    // multi-line string ...). Updated lazily after edits.
+    const std::vector<uint8_t>& lineStates();
 
     // Cached width of the longest line in columns (tabs expanded).
     int maxColumns();
@@ -121,7 +124,7 @@ private:
     bool m_dirty = false;
     size_t m_savedHash = 0;     // hash of the text as last loaded / saved
     bool m_crlf = false;
-    Lang m_lang = Lang::Plain;
+    const Language* m_lang = &plainText();
     int64_t m_mtime = 0;
     int64_t m_size = -1;
     uint64_t m_version = 1;
@@ -131,8 +134,8 @@ private:
     double   m_lastEditTime = 0;
     static constexpr size_t kMaxUndo = 500;
 
-    std::vector<uint8_t> m_commentState;
-    uint64_t m_commentVersion = 0;
+    std::vector<uint8_t> m_lineStates;
+    uint64_t m_statesVersion = 0;
     int      m_maxCols = 0;
     uint64_t m_maxColsVersion = 0;
 };

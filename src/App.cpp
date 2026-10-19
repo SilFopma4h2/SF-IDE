@@ -12,6 +12,7 @@
 #include <imgui.h>
 #include <imgui_internal.h>
 
+#include "Languages.h"
 #include "Theme.h"
 #include "IdeUtil.h"
 #include "Wake.h"
@@ -601,37 +602,104 @@ void App::refreshGitBranch()
 
 // --- Build / run / debug ------------------------------------------------------------
 
-void App::build(int then)
+bool App::projectMode() const
+{
+    return !m_buildCmd.empty() || !m_runCmd.empty() || !m_cmds.build.empty() || !m_cmds.run.empty();
+}
+
+// {file} {dir} {stem} {out} in a language's command template (see Languages.h).
+std::string App::expandTemplate(const std::string& tpl, const std::string& file) const
+{
+    fs::path p(file);
+    std::string out = "/tmp/sf-ide-" + std::to_string(getuid()) + "/" + p.stem().string() + "-" +
+                      std::to_string(std::hash<std::string>{}(file) % 100000);
+    std::string r;
+    for (size_t i = 0; i < tpl.size(); ++i)
+    {
+        if (tpl[i] == '{')
+        {
+            size_t e = tpl.find('}', i);
+            std::string key = e == std::string::npos ? "" : tpl.substr(i + 1, e - i - 1);
+            if (key == "file") { r += shellQuote(file); i = e; continue; }
+            if (key == "dir") { r += shellQuote(p.parent_path().string()); i = e; continue; }
+            if (key == "stem") { r += shellQuote(p.stem().string()); i = e; continue; }
+            if (key == "out") { r += shellQuote(out); i = e; continue; }
+        }
+        r.push_back(tpl[i]);
+    }
+    return r;
+}
+
+// Build (and then run or debug). Uses the project's commands when it has
+// them; otherwise, or with `currentFile`, the active file's language.
+void App::build(int then, bool currentFile)
 {
     if (m_build.running()) return;
     if (settings.saveBeforeBuild) saveAll();
 
-    std::string cmd = !m_buildCmd.empty() ? m_buildCmd : m_cmds.build;
-    std::string dir = m_root;
+    std::string cmd, dir = m_root;
     m_singleFileBuild = false;
-    Document* doc = activeDoc();
-    if (cmd.empty() && doc && !doc->path().empty())
+    if (!currentFile && projectMode())
     {
-        // No project build: compile the current C / C++ file on its own.
-        std::string ext = fs::path(doc->path()).extension().string();
-        bool c = ext == ".c";
-        bool cpp = ext == ".cpp" || ext == ".cc" || ext == ".cxx" || ext == ".mm";
-        if (c || cpp)
+        cmd = !m_buildCmd.empty() ? m_buildCmd : m_cmds.build;
+        if (cmd.empty())
         {
-            std::string out = "/tmp/sf-ide-" + std::to_string(getuid());
-            std::string exe = out + "/" + fs::path(doc->path()).stem().string();
-            cmd = "mkdir -p " + shellQuote(out) + " && " + (c ? "cc -std=c17" : "c++ -std=c++20") +
-                  " -g -O0 -Wall -Wextra " + shellQuote(doc->path()) + " -o " + shellQuote(exe);
-            dir = fs::path(doc->path()).parent_path().string();
-            m_lastExe = exe;
-            m_singleFileBuild = true;
+            // A project with a run command but nothing to build (e.g. Python).
+            if (then == AfterRun) runProgram();
+            else if (then == AfterDebug) startDebug();
+            return;
         }
+    }
+    else
+    {
+        Document* doc = activeDoc();
+        if (!doc || doc->path().empty())
+        {
+            showMessage("Run", doc ? "Save the file first, so SF-IDE knows its language and where it lives."
+                                   : "Open a file to build or run it, or open a project folder.");
+            return;
+        }
+        const Language& L = doc->lang();
+        if (L.build.empty() && L.run.empty())
+        {
+            showMessage("Run", "SF-IDE does not know how to build or run " + L.name + " files on their own.\n\n"
+                               "Set a build and run command for this folder in Project Settings.");
+            return;
+        }
+        m_singleFileBuild = true;
+        m_fileRunCmd = L.run.empty() ? "" : expandTemplate(L.run, doc->path());
+        m_fileRunDir = fs::path(doc->path()).parent_path().string();
+        dir = m_fileRunDir;
+        if (L.compiled)
+        {
+            std::string out = expandTemplate("{out}", doc->path());
+            m_lastExe = out.substr(1, out.size() - 2);  // unquote
+        }
+        // Interpreted languages run straight away; their errors are read from the output.
+        if (!L.compiled && then == AfterRun)
+        {
+            runProgram();
+            return;
+        }
+        if (!L.compiled && then == AfterDebug)
+        {
+            debugCurrentFile();
+            return;
+        }
+        if (L.build.empty())
+        {
+            m_status = L.name + " files have no separate build step - use Run (" + sc("R") + ")";
+            m_statusUntil = now() + 4;
+            return;
+        }
+        cmd = "mkdir -p /tmp/sf-ide-" + std::to_string(getuid()) + " && " + expandTemplate(L.build, doc->path());
     }
     if (cmd.empty())
     {
-        showMessage("Build", "No build command for this folder.\n\nSF-IDE detects CMake, Make, Swift and Meson "
-                             "projects, and builds a single open .c / .cpp file on its own. You can set a custom "
-                             "command in Project Settings.");
+        showMessage("Build", "No build command for this folder.\n\nSF-IDE recognises CMake, Cargo, Go, Swift, Zig, "
+                             "npm / yarn / pnpm / bun, Deno, Maven, Gradle, .NET, mix, Stack / Cabal, Dart, Make "
+                             "and Meson projects, and builds or runs a single file in most languages. You can set "
+                             "a custom command in Project Settings.");
         return;
     }
     if (dir.empty()) dir = ".";
@@ -650,6 +718,7 @@ void App::build(int then)
 std::string App::resolvedRunCommand() const
 {
     std::string args = m_runArgs.empty() ? "" : " " + m_runArgs;
+    if (m_singleFileBuild && !m_fileRunCmd.empty()) return m_fileRunCmd + args;
     if (!m_runCmd.empty()) return m_runCmd + args;
     if (!m_cmds.run.empty()) return m_cmds.run + args;
     if (!m_lastExe.empty()) return shellQuote(m_lastExe) + args;
@@ -670,8 +739,10 @@ void App::runProgram()
         return;
     }
     m_run.stop();
-    std::string dir = m_root.empty() ? fs::path(m_lastExe).parent_path().string() : m_root;
+    std::string dir = m_singleFileBuild && !m_fileRunDir.empty() ? m_fileRunDir
+                      : m_root.empty() ? fs::path(m_lastExe).parent_path().string() : m_root;
     m_run.start({ userShell(), "-l", "-c", cmd }, dir);
+    m_runWasRunning = true;
     m_selectBottomTab = TabRun;
     settings.showBottom = true;
     m_run.focus();
@@ -729,9 +800,113 @@ void App::debugProgram()
     for (auto& a : splitArgs(m_runArgs)) argv.push_back(a);
     m_debug.stop();
     m_debug.start(argv, m_root.empty() ? fs::path(exe).parent_path().string() : m_root);
+    m_debugPdb = false;
     m_selectBottomTab = TabDebug;
     settings.showBottom = true;
     m_debug.focus();
+}
+
+// F5: debug the project when it has commands, otherwise the open file.
+void App::startDebug()
+{
+    if (projectMode())
+    {
+        if (!m_buildCmd.empty() || !m_cmds.build.empty()) build(AfterDebug);
+        else debugCurrentFile();
+        return;
+    }
+    debugCurrentFile();
+}
+
+void App::debugCurrentFile()
+{
+    Document* doc = activeDoc();
+    if (!doc || doc->path().empty())
+    {
+        showMessage("Debug", "Open and save a file to debug it.");
+        return;
+    }
+    const Language& L = doc->lang();
+    if (L.debugger == Language::Debugger::Pdb)
+    {
+        if (settings.saveBeforeBuild) saveAll();
+        debugPython(doc->path());
+    }
+    else if (L.debugger == Language::Debugger::Lldb)
+    {
+        build(AfterDebug, true);
+    }
+    else
+    {
+        showMessage("Debug", "There is no debugger set up for " + L.name + " yet. Use Run (" + sc("R") +
+                                 ") and the clil panel to investigate.");
+    }
+}
+
+// Python: pdb with the gutter breakpoints, stopping at the first one.
+void App::debugPython(const std::string& file)
+{
+    std::string py = findProgram("python3");
+    if (py.empty()) py = findProgram("python");
+    if (py.empty())
+    {
+        showMessage("Debug", "python3 was not found on your PATH.");
+        return;
+    }
+    std::vector<std::string> argv = { py, "-m", "pdb" };
+    bool any = false;
+    for (auto& d : m_docs)
+        for (int line : d->breakpoints)
+        {
+            if (d->lang().debugger != Language::Debugger::Pdb) continue;
+            argv.insert(argv.end(), { "-c", "break " + d->path() + ":" + std::to_string(line) });
+            any = true;
+        }
+    if (any) argv.insert(argv.end(), { "-c", "continue" });
+    argv.push_back(file);
+    for (auto& a : splitArgs(m_runArgs)) argv.push_back(a);
+    m_debug.stop();
+    m_debug.start(argv, fs::path(file).parent_path().string());
+    m_debugPdb = true;
+    m_selectBottomTab = TabDebug;
+    settings.showBottom = true;
+    m_debug.focus();
+}
+
+void App::debugCommand(const char* lldbCmd, const char* pdbCmd)
+{
+    if (!m_debug.running()) return;
+    m_debug.sendText(std::string(m_debugPdb ? pdbCmd : lldbCmd) + "\n", false);
+}
+
+// After a program ends, read its output for errors (Python tracebacks,
+// panics, assertions) so they show up in Problems and in the editor.
+void App::collectRunProblems()
+{
+    DiagnosticParser parser(m_singleFileBuild && !m_fileRunDir.empty() ? m_fileRunDir : m_root);
+    std::vector<Problem> found;
+    std::string text = m_run.recentText();
+    size_t start = 0;
+    while (start < text.size())
+    {
+        size_t e = text.find('\n', start);
+        if (e == std::string::npos) e = text.size();
+        Problem p;
+        if (parser.feed(text.substr(start, e - start), p))
+        {
+            std::error_code ec;
+            if (fs::is_regular_file(p.file, ec)) found.push_back(p);
+        }
+        start = e + 1;
+    }
+    m_run.clearRecentText();
+    if (found.empty()) return;
+    // A traceback lists the failing line last; show that one first.
+    std::reverse(found.begin(), found.end());
+    m_problems = found;
+    applyDiagnostics();
+    m_status = "The program stopped with an error: " + found.front().message;
+    m_statusUntil = now() + 8;
 }
 
 void App::stopAll()
@@ -746,6 +921,28 @@ void App::stopAll()
 void App::followDebugger()
 {
     const std::string& text = m_debug.recentText();
+    if (m_debugPdb)
+    {
+        // pdb: "> /path/file.py(12)<module>()"
+        size_t at = text.rfind("\n> ");
+        if (at == std::string::npos && text.rfind("> ", 0) == 0) at = 0;
+        else if (at != std::string::npos) ++at;
+        if (at == std::string::npos) return;
+        size_t open = text.find('(', at);
+        size_t close = open == std::string::npos ? open : text.find(')', open);
+        size_t eol = text.find('\n', at);
+        if (close == std::string::npos || (eol != std::string::npos && close > eol)) return;
+        std::string file = text.substr(at + 2, open - at - 2);
+        int lineNo = std::atoi(text.c_str() + open + 1);
+        std::error_code ec;
+        if (lineNo <= 0 || !fs::is_regular_file(file, ec)) return;
+        m_debug.clearRecentText();
+        for (auto& d : m_docs) d->execLine = 0;
+        openFile(file, lineNo);
+        if (Document* d = activeDoc()) d->execLine = lineNo;
+        m_debug.focus();
+        return;
+    }
     size_t frame = text.rfind("frame #0:");
     size_t gdbFrame = text.rfind("Breakpoint ");
     size_t gdb0 = text.rfind("\n#0 ");
@@ -1043,6 +1240,14 @@ void App::pump()
         for (auto& d : m_docs) d->execLine = 0;
     }
 
+    if (m_runWasRunning && !m_run.running())
+    {
+        m_runWasRunning = false;
+        m_run.pump();
+        collectRunProblems();
+        changed = true;
+    }
+
     IdeBridge::Request req;
     while (m_bridge.next(req))
     {
@@ -1309,6 +1514,7 @@ void App::drawMenuBar()
         if (ImGui::MenuItem("Build", sc("B").c_str(), false, can)) build(AfterNone);
         if (ImGui::MenuItem("Build & Run", sc("R").c_str(), false, can)) build(AfterRun);
         if (ImGui::MenuItem("Run Without Building", sc("R", true).c_str())) runProgram();
+        if (ImGui::MenuItem("Run Current File", sc("R", false, true).c_str(), false, can && doc != nullptr)) runCurrentFile();
         if (ImGui::MenuItem("Stop", sc(".").c_str(), false, m_build.running() || m_run.running() || m_debug.running())) stopAll();
         ImGui::Separator();
         if (ImGui::MenuItem("Clean Build Folder", nullptr, false, can && !m_root.empty() && fs::exists(m_root + "/build")))
@@ -1324,7 +1530,8 @@ void App::drawMenuBar()
     if (ImGui::BeginMenu("Debug"))
     {
         bool can = !m_build.running();
-        if (ImGui::MenuItem("Build & Debug", "F5", false, can)) build(AfterDebug);
+        if (ImGui::MenuItem("Build & Debug", "F5", false, can)) startDebug();
+        if (ImGui::MenuItem("Debug Current File", nullptr, false, can && doc != nullptr)) debugCurrentFile();
         if (ImGui::MenuItem("Debug Without Building", "\xE2\x87\xA7" "F5")) debugProgram();
         if (ImGui::MenuItem("Toggle Breakpoint", "F9", false, doc != nullptr)) doc->toggleBreakpoint(doc->lineOf(doc->cursor) + 1);
         if (ImGui::MenuItem("Remove All Breakpoints")) for (auto& d : m_docs) d->breakpoints.clear();
@@ -1333,7 +1540,7 @@ void App::drawMenuBar()
         if (ImGui::MenuItem("Continue", nullptr, false, dbg)) m_debug.sendText("continue\n", false);
         if (ImGui::MenuItem("Step Over", "F10", false, dbg)) m_debug.sendText("next\n", false);
         if (ImGui::MenuItem("Step Into", "F11", false, dbg)) m_debug.sendText("step\n", false);
-        if (ImGui::MenuItem("Step Out", "\xE2\x87\xA7" "F11", false, dbg)) m_debug.sendText("finish\n", false);
+        if (ImGui::MenuItem("Step Out", "\xE2\x87\xA7" "F11", false, dbg)) debugCommand("finish", "return");
         if (ImGui::MenuItem("Stop Debugging", nullptr, false, dbg)) m_debug.stop();
         ImGui::EndMenu();
     }
@@ -1386,7 +1593,7 @@ void App::drawToolbarButtons()
     ImGui::SetCursorPosX(std::max(ImGui::GetCursorPosX() + 10, w - buttonsW));
     if (iconButton("##tb_build", Icon::Build, "Build", !building, ("Build  " + sc("B")).c_str(), t.text)) build(AfterNone);
     if (iconButton("##tb_run", Icon::Play, "Run", !building, ("Build & Run  " + sc("R")).c_str(), t.ok)) build(AfterRun);
-    if (iconButton("##tb_debug", Icon::Bug, "Debug", !building, "Build & Debug with lldb  F5", t.warning)) build(AfterDebug);
+    if (iconButton("##tb_debug", Icon::Bug, "Debug", !building, "Debug with lldb (pdb for Python)  F5", t.warning)) startDebug();
     if (iconButton("##tb_stop", Icon::Stop, "Stop", runningAny, ("Stop  " + sc(".")).c_str(), t.error)) stopAll();
 }
 
@@ -1425,6 +1632,7 @@ void App::handleShortcuts()
     if (chord(ImGuiKey_B) && !m_build.running()) build(AfterNone);
     if (chord(ImGuiKey_R) && !m_build.running()) build(AfterRun);
     if (chord(ImGuiKey_R, true)) runProgram();
+    if (chord(ImGuiKey_R, false, true) && !m_build.running()) runCurrentFile();
     if (chord(ImGuiKey_Period)) stopAll();
     if (chord(ImGuiKey_1)) settings.showLeft = !settings.showLeft;
     if (chord(ImGuiKey_J)) settings.showBottom = !settings.showBottom;
@@ -1457,11 +1665,11 @@ void App::handleShortcuts()
     {
         if (io.KeyShift) debugProgram();
         else if (m_debug.running()) m_debug.sendText("continue\n", false);
-        else build(AfterDebug);
+        else startDebug();
     }
     if (doc && ImGui::IsKeyPressed(ImGuiKey_F9, false)) doc->toggleBreakpoint(doc->lineOf(doc->cursor) + 1);
     if (m_debug.running() && ImGui::IsKeyPressed(ImGuiKey_F10, false)) m_debug.sendText("next\n", false);
-    if (m_debug.running() && ImGui::IsKeyPressed(ImGuiKey_F11, false)) m_debug.sendText(io.KeyShift ? "finish\n" : "step\n", false);
+    if (m_debug.running() && ImGui::IsKeyPressed(ImGuiKey_F11, false)) debugCommand(io.KeyShift ? "finish" : "step", io.KeyShift ? "return" : "step");
     if (m_findOpen && ImGui::IsKeyPressed(ImGuiKey_Escape, false) && !ImGui::IsPopupOpen(nullptr, ImGuiPopupFlags_AnyPopupId))
     {
         m_findOpen = m_replaceOpen = false;
@@ -1729,7 +1937,7 @@ void App::drawWelcome()
     ImGui::SetWindowFontScale(1.0f);
     ImGui::PopFont();
     ImGui::PushStyleColor(ImGuiCol_Text, col4(t.textDim));
-    ImGui::TextUnformatted("A small, native C/C++ IDE with clil built in.");
+    ImGui::TextUnformatted("A small, native IDE for C, C++, Python, Rust, Go, JavaScript and many more, with clil built in.");
     ImGui::PopStyleColor();
     ImGui::Dummy(ImVec2(0, 18));
 
@@ -1859,7 +2067,7 @@ void App::drawBottomPanel(float w, float h)
         if (m_debug.running())
         {
             if (rightButton("Stop##bd", "Stop debugging")) m_debug.stop();
-            if (rightButton("Out##bd", "Step out (finish)")) m_debug.sendText("finish\n", false);
+            if (rightButton("Out##bd", "Step out (finish)")) debugCommand("finish", "return");
             if (rightButton("Into##bd", "Step into  F11")) m_debug.sendText("step\n", false);
             if (rightButton("Over##bd", "Step over  F10")) m_debug.sendText("next\n", false);
             if (rightButton("Continue##bd", "Continue  F5")) m_debug.sendText("continue\n", false);
@@ -2123,26 +2331,41 @@ void App::drawStatusBar(float w, float h)
     }
 
     // Right side: cursor position and file info.
-    std::string info;
+    std::string info, langLabel;
     if (Document* d = activeDoc())
     {
         int line = d->lineOf(d->cursor);
         int col = d->columnOf(line, d->cursor) + 1;
         char buf[160];
-        const char* lang = d->lang() == Document::Lang::CFamily ? "C/C++" : d->lang() == Document::Lang::Hash ? "Script"
-                         : d->lang() == Document::Lang::Markdown ? "Markdown" : "Plain Text";
         if (d->hasSelection())
-            std::snprintf(buf, sizeof buf, "Ln %d, Col %d (%zu selected)     UTF-8     %s", line + 1, col,
-                          d->selMax() - d->selMin(), lang);
+            std::snprintf(buf, sizeof buf, "Ln %d, Col %d (%zu selected)     UTF-8", line + 1, col,
+                          d->selMax() - d->selMin());
         else
-            std::snprintf(buf, sizeof buf, "Ln %d, Col %d     UTF-8     %s", line + 1, col, lang);
+            std::snprintf(buf, sizeof buf, "Ln %d, Col %d     UTF-8", line + 1, col);
         info = buf;
+        langLabel = d->lang().name;
     }
     std::string clilState = !m_clilMissingReason.empty() ? "clil: not found" : m_clil.running() ? "clil: on" : "clil: off";
-    info += (info.empty() ? "" : "     ") + clilState;
-    float iw = ImGui::CalcTextSize(info.c_str()).x;
+    const float gap = 20;
+    float iw = ImGui::CalcTextSize(info.c_str()).x + ImGui::CalcTextSize(clilState.c_str()).x + gap;
+    if (!langLabel.empty()) iw += ImGui::CalcTextSize(langLabel.c_str()).x + 8 + gap;
     ImGui::SameLine(std::max(ImGui::GetCursorPosX() + 20, w - iw - 14));
-    ImGui::TextDisabled("%s", info.c_str());
+    if (!info.empty())
+    {
+        ImGui::TextDisabled("%s", info.c_str());
+        ImGui::SameLine(0, gap);
+    }
+    if (!langLabel.empty())
+    {
+        // The language is a button: pick another one for this file.
+        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0, 0, 0, 0));
+        ImGui::PushStyleColor(ImGuiCol_Text, col4(t.textDim));
+        if (ImGui::SmallButton((langLabel + "##lang").c_str())) m_openLangPicker = true;
+        ImGui::PopStyleColor(2);
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) ImGui::SetTooltip("Change the language of this file");
+        ImGui::SameLine(0, gap);
+    }
+    ImGui::TextDisabled("%s", clilState.c_str());
     ImGui::PopStyleVar();
     ImGui::EndChild();
     ImGui::PopStyleVar();
@@ -2204,6 +2427,42 @@ void App::drawQuickOpen()
     }
     if (hits.empty()) ImGui::TextDisabled("No matching files");
     ImGui::EndChild();
+    ImGui::EndPopup();
+}
+
+void App::drawLanguagePicker()
+{
+    if (m_openLangPicker) { ImGui::OpenPopup("##languages"); m_openLangPicker = false; }
+    const ImGuiViewport* vp = ImGui::GetMainViewport();
+    ImGui::SetNextWindowPos(ImVec2(vp->Pos.x + vp->Size.x * 0.5f, vp->Pos.y + 60), ImGuiCond_Always, ImVec2(0.5f, 0));
+    ImGui::SetNextWindowSize(ImVec2(360, 0));
+    if (!ImGui::BeginPopup("##languages")) return;
+    static char filter[64] = {};
+    if (ImGui::IsWindowAppearing())
+    {
+        filter[0] = 0;
+        ImGui::SetKeyboardFocusHere();
+    }
+    ImGui::SetNextItemWidth(-1);
+    ImGui::InputTextWithHint("##langfilter", "Language", filter, sizeof filter);
+    Document* d = activeDoc();
+    ImGui::BeginChild("##langlist", ImVec2(0, 320));
+    std::string f = filter;
+    for (auto& c : f) c = char(std::tolower((unsigned char)c));
+    auto item = [&](const Language& L) {
+        std::string n = L.name;
+        for (auto& c : n) c = char(std::tolower((unsigned char)c));
+        if (!f.empty() && n.find(f) == std::string::npos && L.id.find(f) == std::string::npos) return;
+        if (ImGui::Selectable(L.name.c_str(), d && &d->lang() == &L))
+        {
+            if (d) d->setLanguage(L);
+            ImGui::CloseCurrentPopup();
+        }
+    };
+    item(plainText());
+    for (const auto& L : allLanguages()) item(L);
+    ImGui::EndChild();
+    if (ImGui::IsKeyPressed(ImGuiKey_Escape)) ImGui::CloseCurrentPopup();
     ImGui::EndPopup();
 }
 
@@ -2290,6 +2549,8 @@ void App::drawPopups()
 
     if (m_openQuick) { ImGui::OpenPopup("Quick Open"); m_openQuick = false; }
     drawQuickOpen();
+
+    drawLanguagePicker();
 
     if (m_openSettings) { ImGui::OpenPopup("Settings"); m_openSettings = false; }
     ImGui::SetNextWindowPos(center, ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
@@ -2467,7 +2728,7 @@ void App::drawPopups()
     if (modal("About SF-IDE"))
     {
         ImGui::TextUnformatted("SF-IDE 2.0");
-        ImGui::TextDisabled("A small native C/C++ IDE for macOS, with the clil coding agent built in.");
+        ImGui::TextDisabled("A small native IDE for macOS for 50 languages, with the clil coding agent built in.");
         ImGui::TextDisabled("Dear ImGui %s  \xC2\xB7  GLFW  \xC2\xB7  OpenGL", IMGUI_VERSION);
         ImGui::Spacing();
         if (ImGui::Button("OK", ImVec2(100, 0)) || ImGui::IsKeyPressed(ImGuiKey_Escape)) ImGui::CloseCurrentPopup();
